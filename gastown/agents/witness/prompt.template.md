@@ -206,7 +206,7 @@ if [ -n "$WISP" ]; then
   gc bd update "$WISP" --assignee="$GC_AGENT" --status=in_progress
 else
   gc mail inbox
-  WISP=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{ .BindingPrefix }}' --json | jq -r '.new_ephic_id // .new_epic_id // empty')
+  WISP=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{ .BindingPrefix }}' --json | jq -r '.new_epic_id // empty')
   gc bd update "$WISP" --assignee="$GC_AGENT" --status=in_progress
 fi
 
