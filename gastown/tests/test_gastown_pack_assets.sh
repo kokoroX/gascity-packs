@@ -369,6 +369,37 @@ test_witness_wisp_reconcile_excludes_current() {
         fail "witness next-iteration must assign the successor with --status=in_progress"
 }
 
+test_refinery_wisp_lifecycle() {
+    local formula prompt total flagged
+    formula="$GASTOWN/formulas/mol-refinery-patrol.toml"
+    prompt="$GASTOWN/agents/refinery/prompt.template.md"
+
+    # Every successor assignment must transition its wisp to in_progress so a
+    # restart can resume it instead of pouring another one.
+    ! grep -Eq 'gc bd update "?\$(NEXT|WISP)"? --assignee=("?\$GC_AGENT"?)[[:space:]]*(;|$)' "$formula" "$prompt" ||
+        fail "refinery wisp assigns must pass --status=in_progress"
+
+    # Wisp roots live in the infra tier; fallback current-wisp lookups without
+    # --include-infra return no result and can leave the current wisp unburned.
+    for asset in "$formula" "$prompt"; do
+        total=$(grep -F 'CURRENT_WISP=$(gc bd list' "$asset" | grep -F -- '--type=molecule' | wc -l | tr -d ' ')
+        flagged=$(grep -F 'CURRENT_WISP=$(gc bd list' "$asset" | grep -F -- '--type=molecule' | grep -F -- '--include-infra' | wc -l | tr -d ' ')
+        [[ "$total" -gt 0 && "$flagged" -eq "$total" ]] ||
+            fail "$(basename "$asset") CURRENT_WISP molecule lookups must pass --include-infra ($flagged/$total do)"
+    done
+
+    # Startup must reconcile both statuses from the infra tier, then assign the
+    # retained or newly poured wisp in_progress.
+    grep -Fq -- '--status=open,in_progress --type=molecule --include-infra' "$prompt" ||
+        fail "refinery startup must reconcile open and in_progress wisps with --include-infra"
+    ! grep -Fq '{{ .AssignedInProgressQuery }}' "$prompt" ||
+        fail "refinery startup must not use the in_progress-only AssignedInProgressQuery"
+
+    # Keep the human-facing startup example aligned with the executable paths.
+    grep -Fq 'gc bd update $WISP --assignee=$GC_AGENT --status=in_progress' "$formula" ||
+        fail "refinery formula description must assign its example wisp in_progress"
+}
+
 test_witness_handoff_recovery_is_guarded_and_fail_closed() {
     local witness polecat refinery block signature writers
 
@@ -773,6 +804,7 @@ test_review_leg_contract_forbids_synthetic_mutation
 test_prime_prompts_are_city_generic_and_compact
 test_witness_wisp_queries_pin_include_infra
 test_witness_wisp_reconcile_excludes_current
+test_refinery_wisp_lifecycle
 test_witness_handoff_recovery_is_guarded_and_fail_closed
 test_boot_wisp_queries_pin_include_infra
 test_boot_patrol_burn_resolves_current_wisp
