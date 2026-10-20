@@ -70,14 +70,14 @@ external observers (witness, mayor) only catch on a slow patrol cycle.
 ```bash
 CURRENT_WISP=${GC_BEAD_ID:-}
 if [ -z "$CURRENT_WISP" ]; then
-  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')
+  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --include-infra --limit=1 --json | jq -r '.[0].id // empty')
 fi
 NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')
 if [ -z "$NEXT" ]; then
   echo "Could not pour next refinery wisp; not burning."
   exit 1
 fi
-if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
+if ! gc bd update "$NEXT" --assignee="$GC_AGENT" --status=in_progress; then
   echo "Could not assign next refinery wisp; not burning."
   exit 1
 fi
@@ -115,14 +115,14 @@ assign the next wisp, burn the current wisp, THEN request restart**:
 ```bash
 CURRENT_WISP=${GC_BEAD_ID:-}
 if [ -z "$CURRENT_WISP" ]; then
-  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')
+  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --include-infra --limit=1 --json | jq -r '.[0].id // empty')
 fi
 NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')
 if [ -z "$NEXT" ]; then
   echo "Could not pour next refinery wisp; not requesting restart."
   exit 1
 fi
-if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
+if ! gc bd update "$NEXT" --assignee="$GC_AGENT" --status=in_progress; then
   echo "Could not assign next refinery wisp; not requesting restart."
   exit 1
 fi
@@ -159,6 +159,11 @@ name when no alias is configured. `$GC_ALIAS` can be empty or stale, which
 is how a refinery once self-polled for 13h42m with seven queued beads
 without catching the mismatch (upstream #1833).
 
+Startup includes both `open` and `in_progress` because older pack versions
+could leave an assigned patrol wisp open; reconciling both prevents duplicate pours.
+Wisp roots are ephemeral molecules in the infra tier, so the query must pass
+`--include-infra` to see them.
+
 ```bash
 # Step 0: Orphan-merge scan (mail-loss fallback).
 # Polecats sometimes die between commit and MERGE_READY mail
@@ -174,12 +179,24 @@ for ORPHAN in $ORPHANS; do
   # surfaces beads the inbox missed.
 done
 
-# Step 1: Check for an in-progress patrol wisp
-{{ .AssignedInProgressQuery }}
-
-# If none found, pour one (root-only — no child step beads) and assign it
-WISP=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id')
-gc bd update "$WISP" --assignee="$GC_AGENT"
+# Step 1: Reconcile patrol wisps to exactly one, then resume it.
+# A wisp poured by an older pack may still be status=open, so look at
+# open AND in_progress (comma form; repeating --status keeps only the last).
+# Wisp roots are ephemeral molecules: --include-infra is required.
+WISPS=$(gc bd list --assignee="$GC_AGENT" --status=open,in_progress --type=molecule --include-infra --limit=0 --json \
+  | jq -r 'sort_by(if .status == "in_progress" then 0 else 1 end, .created_at) | .[].id')
+WISP=$(printf '%s\n' $WISPS | sed -n '1p')
+for extra in $(printf '%s\n' $WISPS | sed '1d'); do
+  gc bd mol burn "$extra" --force
+done
+if [ -z "$WISP" ]; then
+  WISP=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')
+fi
+if [ -z "$WISP" ] || ! gc bd update "$WISP" --assignee="$GC_AGENT" --status=in_progress; then
+  echo "Could not resolve or assign a refinery patrol wisp."
+  gc runtime drain-ack
+  exit 1
+fi
 ```
 
 Then follow the formula. The step descriptions below are your instructions —
