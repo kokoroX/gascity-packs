@@ -793,6 +793,30 @@ test_prime_prompts_are_city_generic_and_compact() {
         fail "shipped run_bounded must report a signal-killed child as 128+N (want 143, got $helper_rc)"
 }
 
+test_refinery_pre_existing_failures_use_city_store() {
+    local formula failure_lines failure_count unscoped work_lines
+    formula="$GASTOWN/formulas/mol-refinery-patrol.toml"
+
+    ! grep -rn -- '--search' "$GASTOWN/formulas/" >/dev/null ||
+        fail "gastown formulas must not use the unsupported --search flag"
+
+    failure_lines=$(grep -F 'Pre-existing failure' "$formula" | grep -F 'gc bd' || true)
+    [[ -n "$failure_lines" ]] ||
+        fail "refinery pre-existing failure guidance must include gc bd duplicate/create commands"
+    unscoped=$(printf '%s\n' "$failure_lines" | grep -c -v -F -- '--city="$GC_CITY"' || true)
+    [[ "$unscoped" -eq 0 ]] ||
+        fail "every refinery pre-existing failure gc bd line must use the city store ($unscoped do not)"
+    failure_count=$(printf '%s\n' "$failure_lines" | wc -l | tr -d ' ')
+    [[ "$failure_count" -ge 2 ]] ||
+        fail "refinery must have at least two city-scoped pre-existing failure gc bd lines (found $failure_count)"
+
+    work_lines=$(grep -F 'WORK=$(gc bd list' "$formula" || true)
+    [[ -n "$work_lines" ]] ||
+        fail "refinery formula must retain its WORK bead lookup"
+    ! printf '%s\n' "$work_lines" | grep -F -- '--city' >/dev/null ||
+        fail "refinery WORK bead lookup must remain rig scoped"
+}
+
 test_dog_assets_are_pack_local
 test_retired_dog_formulas_are_not_reintroduced
 test_shutdown_dance_contracts_are_executable
@@ -811,6 +835,7 @@ test_boot_patrol_burn_resolves_current_wisp
 test_boot_deacon_observation_query_sees_wisps_tier
 test_refinery_direct_merge_is_worktree_safe_and_fail_closed
 test_refinery_rebase_guidance_matches_the_guarded_step
+test_refinery_pre_existing_failures_use_city_store
 
 python3 - "$GASTOWN/formulas/mol-polecat-work.toml" <<'PY' || fail "every mol-polecat-work step must share its continuation group"
 import sys
