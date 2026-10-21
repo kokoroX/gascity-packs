@@ -631,14 +631,15 @@ TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_bran
    - Close this step after the current wisp is burned.
 
 3. If pre-existing on target:
+   - File these bugs in the city (HQ) store, not the rig work store; use the same city scope and `Pre-existing failure:` title prefix as polecat so both roles find the same cards.
    - Check for duplicates first:
      ```bash
-     gc bd list --type=bug --status=open --search "<failure summary>"
+     gc bd ${GC_CITY:+--city="$GC_CITY"} list --type=bug --status=open --title-contains "Pre-existing failure: <summary>" --json
      ```
    - If a matching bug already exists: note its ID and proceed with merge.
    - If no duplicate: file a new bead:
      ```bash
-     gc bd create --type=bug --priority=1 --title="Pre-existing failure: <summary>"
+     gc bd ${GC_CITY:+--city="$GC_CITY"} create --type=bug --priority=1 --title="Pre-existing failure: <summary>"
      ```
    - Proceed with merge (failure not caused by this branch)
 
