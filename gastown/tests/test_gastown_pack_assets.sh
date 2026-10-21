@@ -812,4 +812,17 @@ test_boot_deacon_observation_query_sees_wisps_tier
 test_refinery_direct_merge_is_worktree_safe_and_fail_closed
 test_refinery_rebase_guidance_matches_the_guarded_step
 
+python3 - "$GASTOWN/formulas/mol-polecat-work.toml" <<'PY' || fail "every mol-polecat-work step must share its continuation group"
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as handle:
+    formula = tomllib.load(handle)
+
+for step in formula.get("steps", []):
+    if step.get("metadata", {}).get("gc.continuation_group") != "polecat-work":
+        print(f"mol-polecat-work step {step.get('id', '<missing id>')} has the wrong gc.continuation_group", file=sys.stderr)
+        sys.exit(1)
+PY
+
 echo "gastown pack asset tests passed"

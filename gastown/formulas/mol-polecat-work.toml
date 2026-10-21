@@ -61,6 +61,7 @@ default = ""
 id = "workspace-setup"
 title = "Set up worktree and feature branch"
 needs = ["load-context"]
+metadata = { "gc.continuation_group" = "polecat-work" }
 description = """
 Ensure you have an isolated git worktree and a clean feature branch.
 Every check is idempotent — safe to re-run after crash/restart.
@@ -546,6 +547,7 @@ on the bead."""
 id = "self-review"
 title = "Self-review and run tests (affected-aware)"
 needs = ["implement"]
+metadata = { "gc.continuation_group" = "polecat-work" }
 description = """
 Review your changes and verify they work. Override of mol-polecat-base
 `self-review` to support affected-test detection — when the rig configures
@@ -655,6 +657,7 @@ changes committed, working tree clean."""
 id = "submit-and-exit"
 title = "Submit work to refinery and exit"
 needs = ["self-review"]
+metadata = { "gc.continuation_group" = "polecat-work" }
 description = """
 Hand off your work and self-clean. You cease to exist after this step.
 
