@@ -123,9 +123,13 @@ github_repo_from_origin_url() {
     printf '%s/%s\n' "$origin_owner" "$origin_repo"
 }
 
+# GC_REPO_ROOT, when set, names the code repository this binding works; the
+# rig root keeps holding the bead store. Unset, the rig root is the repository.
+REPO_ROOT=${GC_REPO_ROOT:-${GC_RIG_ROOT:-}}
+
 rig_git() {
-    if [ -n "${GC_RIG_ROOT:-}" ]; then
-        git -C "$GC_RIG_ROOT" "$@"
+    if [ -n "$REPO_ROOT" ]; then
+        git -C "$REPO_ROOT" "$@"
     else
         git "$@"
     fi
@@ -135,9 +139,9 @@ rig_git_without_history_overrides() {
     # Both refs/replace and the deprecated info/grafts file rewrite ancestry
     # for merge-base. Neither is acceptable evidence that a GitHub merge
     # commit reached the recorded target.
-    if [ -n "${GC_RIG_ROOT:-}" ]; then
+    if [ -n "$REPO_ROOT" ]; then
         GIT_GRAFT_FILE=/dev/null \
-            git --no-replace-objects -C "$GC_RIG_ROOT" "$@"
+            git --no-replace-objects -C "$REPO_ROOT" "$@"
     else
         GIT_GRAFT_FILE=/dev/null git --no-replace-objects "$@"
     fi

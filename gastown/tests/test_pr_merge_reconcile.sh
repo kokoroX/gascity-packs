@@ -617,6 +617,18 @@ test_merged_validated_head_and_target_closes() {
         fail "close, cleanup, and marker-clear order is not crash safe"
 }
 
+test_merged_reachability_uses_repo_root() {
+    reset_case
+    write_pending_list
+    write_pr_info MERGED "$HEAD_A" 2026-07-26T19:30:00Z "$MERGE_SHA"
+    GC_REPO_ROOT=/srv/tributary-docs "$COMMAND"
+
+    grep -F "<--no-replace-objects> <-C> </srv/tributary-docs> <merge-base> <--is-ancestor> <$MERGE_SHA> <refs/remotes/origin/main>" "$LOG" >/dev/null ||
+        fail "merge reachability must use GC_REPO_ROOT when the binding works another repository"
+    ! grep -F "<-C> <$GC_RIG_ROOT>" "$LOG" >/dev/null ||
+        fail "GC_REPO_ROOT binding still ran git in the rig root"
+}
+
 test_merged_changed_head_stays_blocked() {
     reset_case
     write_pending_list
@@ -1089,6 +1101,7 @@ test_rest_fallback_preserves_open_pending_state
 test_open_changed_head_requeues_for_validation
 test_closed_unmerged_stays_blocked_and_escalates
 test_merged_validated_head_and_target_closes
+test_merged_reachability_uses_repo_root
 test_merged_changed_head_stays_blocked
 test_verified_merge_close_failure_remains_retryable
 test_verified_merge_retry_error_preserves_stored_evidence

@@ -99,6 +99,37 @@ instead (`--formula` is a boolean that reinterprets the positional argument), an
 `--on <formula>` attaches one to an existing bead. `[agent_defaults]` is the one
 knob that cannot override the agent's own value.
 
+## Several repositories in one rig
+
+A rig owns one bead store, and Gas City keeps rig prefixes unique, so a store
+cannot be split across rigs. To work several code repositories against one
+store, import Gastown into the same rig once per repository under different
+bindings, and point each extra binding's rig-scoped agents at its repository:
+
+```toml
+[rigs.imports.gastown]          # works the rig repository
+source = "..."
+
+[rigs.imports.gdocs]            # works a second repository
+source = "..."
+
+[[patches.agent]]
+rig = "myrig"
+name = "gdocs.polecat"
+work_dir = ".gc/worktrees/myrig-docs/polecats/{{.AgentBase}}"
+pre_start = ["<script that runs worktree-setup.sh against /repos/docs, then points .beads/redirect at the rig's .beads>"]
+env = { GC_REPO_ROOT = "/repos/docs" }
+```
+
+Set the same `GC_REPO_ROOT`, `work_dir`, and `pre_start` on the binding's
+refinery and witness. `GC_RIG_ROOT` keeps naming the rig (and its bead store);
+`GC_REPO_ROOT` names the repository the binding's task worktrees, artifact
+cleanup, orphan recovery, and PR reconciliation operate on. Unset, the rig
+repository is used. Each binding's polecats hand off to the same binding's
+refinery (`{{binding_prefix}}refinery`), and each witness recovers only its
+binding's beads. Formula vars such as `test_command` are per rig, so a shared
+command must pick the gate for the repository it runs in.
+
 ## Dog Pool
 
 Gastown owns `mol-shutdown-dance` and the dog agent that runs stuck-agent

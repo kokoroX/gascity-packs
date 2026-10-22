@@ -8,6 +8,12 @@
 #   GC_CITY_PATH  physical Gas City root
 #   GC_RIG        rig name
 #   GC_RIG_ROOT   canonical rig repository
+#
+# Optional environment:
+#   GC_REPO_ROOT  code repository of this binding when it differs from the rig
+#                 repository (several bindings of one rig working different
+#                 repositories); artifacts are validated against it, and a
+#                 no-argument sweep skips artifacts of other repositories
 
 set -eu
 
@@ -36,6 +42,19 @@ for required_command in gc git jq; do
     fi
 done
 
+REPO_ROOT_SOURCE=${GC_REPO_ROOT:-$GC_RIG_ROOT}
+RIG_ROOT=$(CDPATH= cd -- "$REPO_ROOT_SOURCE" 2>/dev/null && pwd -P) || {
+    echo "ARTIFACT_CLEANUP_BLOCKED repository root is missing: $REPO_ROOT_SOURCE" >&2
+    exit 2
+}
+
+artifact_git_common_dir() {
+    repo_dir=$1
+    common_dir=$(git -C "$repo_dir" rev-parse \
+        --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+    (CDPATH= cd -- "$common_dir" 2>/dev/null && pwd -P)
+}
+
 if [ -z "$WORK" ]; then
     PENDING_JSON=$(gc bd --rig "$GC_RIG" list \
         --status=closed \
@@ -45,7 +64,7 @@ if [ -z "$WORK" ]; then
         echo "ARTIFACT_CLEANUP_BLOCKED could not list pending cleanup work" >&2
         exit 1
     }
-    WORK=$(printf '%s' "$PENDING_JSON" | jq -r '
+    PENDING_ROWS=$(printf '%s' "$PENDING_JSON" | jq -r '
         if type != "array" then
             error("expected a work bead array")
         else
@@ -61,12 +80,31 @@ if [ -z "$WORK" ]; then
                 )
             ]
             | sort_by(.updated_at // "")
-            | .[0].id // empty
+            | .[]
+            | [.id, (.metadata.artifact_dir // .metadata.work_dir // "")]
+            | @tsv
         end
     ') || {
         echo "ARTIFACT_CLEANUP_BLOCKED invalid pending cleanup response" >&2
         exit 1
     }
+    # Other bindings of this rig may work other repositories; skip their
+    # artifacts so they neither block nor starve this repository's queue. A row
+    # whose artifact is already gone only needs metadata repair and stays eligible.
+    REPO_COMMON=$(artifact_git_common_dir "$RIG_ROOT") || {
+        echo "ARTIFACT_CLEANUP_BLOCKED repository root is not a Git repository: $RIG_ROOT" >&2
+        exit 2
+    }
+    TAB=$(printf '\t')
+    WORK=$(printf '%s\n' "$PENDING_ROWS" | while IFS="$TAB" read -r row_id row_dir; do
+        [ -n "$row_id" ] || continue
+        if [ -n "$row_dir" ] && [ -e "$row_dir" ]; then
+            row_common=$(artifact_git_common_dir "$row_dir") || row_common=
+            [ -z "$row_common" ] || [ "$row_common" = "$REPO_COMMON" ] || continue
+        fi
+        printf '%s\n' "$row_id"
+        break
+    done)
     if [ -z "$WORK" ]; then
         echo "ARTIFACT_CLEANUP_IDLE no closed pending artifacts"
         exit 0
@@ -84,10 +122,6 @@ CITY_ROOT=$(CDPATH= cd -- "$GC_CITY_PATH" 2>/dev/null && pwd -P) || {
     echo "ARTIFACT_CLEANUP_BLOCKED city root is missing: $GC_CITY_PATH" >&2
     exit 2
 }
-RIG_ROOT=$(CDPATH= cd -- "$GC_RIG_ROOT" 2>/dev/null && pwd -P) || {
-    echo "ARTIFACT_CLEANUP_BLOCKED rig root is missing: $GC_RIG_ROOT" >&2
-    exit 2
-}
 RIG_NAMESPACE="$CITY_ROOT/.gc/worktrees/$GC_RIG"
 RIG_NAMESPACE_REAL=$(CDPATH= cd -- "$RIG_NAMESPACE" 2>/dev/null && pwd -P) || {
     echo "ARTIFACT_CLEANUP_BLOCKED rig worktree namespace is missing: $RIG_NAMESPACE" >&2
@@ -97,13 +131,6 @@ if [ "$RIG_NAMESPACE_REAL" != "$RIG_NAMESPACE" ]; then
     echo "ARTIFACT_CLEANUP_BLOCKED rig worktree namespace is redirected: $RIG_NAMESPACE" >&2
     exit 2
 fi
-
-artifact_git_common_dir() {
-    repo_dir=$1
-    common_dir=$(git -C "$repo_dir" rev-parse \
-        --path-format=absolute --git-common-dir 2>/dev/null) || return 1
-    (CDPATH= cd -- "$common_dir" 2>/dev/null && pwd -P)
-}
 
 valid_object_id() {
     object_id=$1
