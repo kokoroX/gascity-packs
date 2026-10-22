@@ -177,6 +177,10 @@ open/unassigned before witness observes it; that requires a separate
 worktree-salvage scan keyed by canonical `metadata.artifact_dir`, with a
 validated legacy `metadata.work_dir` fallback. Bound Gastown polecat
 assignees use the shape `<rig>/{{binding_prefix}}<polecat-suffix>`.
+Only recover beads whose assignee starts with `<rig>/{{binding_prefix}}`. A rig
+can import Gastown under several bindings, each working its own repository
+(`GC_REPO_ROOT`) with its own witness; leave other bindings' beads to their
+witness.
 
 Get the full session roster for liveness checks:
 ```bash
@@ -455,7 +459,7 @@ fi
 if [ "$RECOVERY_BLOCKED" != true ] && [ -n "$ARTIFACT_CANDIDATE" ]; then
   if WORKTREE=$(validate_recovery_artifact_worktree \
       "$ARTIFACT_CANDIDATE" "$GC_CITY_PATH" "$GC_RIG" \
-      "$GC_RIG_ROOT" <bead>); then
+      "${GC_REPO_ROOT:-$GC_RIG_ROOT}" <bead>); then
     if [ "$ARTIFACT_SOURCE" = work_dir ]; then
       if confirm_orphan_still_unowned; then
         gc bd update <bead> \
@@ -962,15 +966,15 @@ if [ "$RECOVERY_MODE" != none ]; then
        { [ -z "$CURRENT_ARTIFACT" ] ||
        ! validate_recovery_artifact_worktree \
          "$CURRENT_ARTIFACT" "$GC_CITY_PATH" "$GC_RIG" \
-         "$GC_RIG_ROOT" <bead> >/dev/null; }; then
+         "${GC_REPO_ROOT:-$GC_RIG_ROOT}" <bead> >/dev/null; }; then
       ARTIFACT_SAFE=true
     fi
   elif REVALIDATED_WORKTREE=$(validate_recovery_artifact_worktree \
       "$CURRENT_ARTIFACT" "$GC_CITY_PATH" "$GC_RIG" \
-      "$GC_RIG_ROOT" <bead>) &&
+      "${GC_REPO_ROOT:-$GC_RIG_ROOT}" <bead>) &&
        [ "$REVALIDATED_WORKTREE" = "$WORKTREE" ]; then
     LOCAL_SHA=$(git -C "$WORKTREE" rev-parse HEAD 2>/dev/null || true)
-    REMOTE_SHA=$(git -C "$GC_RIG_ROOT" ls-remote --heads origin \
+    REMOTE_SHA=$(git -C "${GC_REPO_ROOT:-$GC_RIG_ROOT}" ls-remote --heads origin \
       "refs/heads/$BRANCH" 2>/dev/null | cut -f1)
     if [ -n "$BRANCH" ] && [ -n "$LOCAL_SHA" ] &&
        [ "$LOCAL_SHA" = "$REMOTE_SHA" ]; then
@@ -993,15 +997,15 @@ fi
 # END WITNESS_ARTIFACT_SAFETY_GATE
 
 if [ "$ARTIFACT_SAFE" = true ]; then
-  cd "$GC_RIG_ROOT" || {
-    echo "Rig root disappeared before artifact removal; preserving bead state." >&2
+  cd "${GC_REPO_ROOT:-$GC_RIG_ROOT}" || {
+    echo "Repository root disappeared before artifact removal; preserving bead state." >&2
     ARTIFACT_SAFE=false
   }
 fi
 
 if [ "$ARTIFACT_SAFE" = true ]; then
   if [ -n "$WORKTREE" ] &&
-     ! git -C "$GC_RIG_ROOT" worktree remove "$WORKTREE"; then
+     ! git -C "${GC_REPO_ROOT:-$GC_RIG_ROOT}" worktree remove "$WORKTREE"; then
     echo "Validated artifact could not be removed cleanly; preserving bead state." >&2
     ARTIFACT_SAFE=false
   fi

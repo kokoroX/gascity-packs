@@ -370,7 +370,7 @@ gc mail send mayor/ -s "ESCALATION: Brief description [HIGH]" -m "Details"
 | Context exhaustion | `gc runtime request-restart` |
 | Recover orphaned bead | `gc workflow delete-source <id> --apply && gc workflow reopen-source <id>` |
 | Salvage worktree work | `git add -A && git commit && git push origin HEAD` |
-| Remove validated clean artifact | `git -C "$GC_RIG_ROOT" worktree remove "$WORKTREE"` (only after the formula's fresh ownership, path, SHA, remote-ref, and status checks) |
+| Remove validated clean artifact | `git -C "${GC_REPO_ROOT:-$GC_RIG_ROOT}" worktree remove "$WORKTREE"` (only after the formula's fresh ownership, path, SHA, remote-ref, and status checks) |
 | Set branch metadata | `gc bd update <id> --set-metadata branch=<name>` |
 | File stuck-agent warrant | `gc bd create --type=task --labels=warrant --metadata '{"target":"<session>","reason":"<reason>","requester":"witness","gc.routed_to":"{{ .BindingPrefix }}dog"}'` |
 

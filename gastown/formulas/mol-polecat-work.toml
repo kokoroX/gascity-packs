@@ -214,8 +214,11 @@ CITY_ROOT=$(CDPATH= cd -- "$GC_CITY_PATH" 2>/dev/null && pwd -P) || {
   gc runtime drain-ack
   exit 1
 }
-RIG_ROOT=$(CDPATH= cd -- "$GC_RIG_ROOT" 2>/dev/null && pwd -P) || {
-  echo "Rig root is missing: $GC_RIG_ROOT" >&2
+# GC_REPO_ROOT, when set, names the code repository this binding works; the
+# rig root keeps holding the bead store. Unset, the rig root is the repository.
+REPO_ROOT_SOURCE=${GC_REPO_ROOT:-$GC_RIG_ROOT}
+RIG_ROOT=$(CDPATH= cd -- "$REPO_ROOT_SOURCE" 2>/dev/null && pwd -P) || {
+  echo "Repository root is missing: $REPO_ROOT_SOURCE" >&2
   gc runtime drain-ack
   exit 1
 }

@@ -9,7 +9,10 @@ Usage:
 gc gastown task-artifact-cleanup [work-bead-id]
 ```
 
-The command requires `GC_CITY_PATH`, `GC_RIG`, and `GC_RIG_ROOT`. It accepts
+The command requires `GC_CITY_PATH`, `GC_RIG`, and `GC_RIG_ROOT`. When the
+binding works a repository other than the rig's, `GC_REPO_ROOT` names it;
+artifacts are validated against that repository, and a no-argument sweep skips
+artifacts that belong to another repository of the same rig. It accepts
 only the exact canonical artifact path for that city and rig, or the exact
 historical polecat-provider layout for an intentionally adopted legacy
 artifact. It never force-removes a worktree.

@@ -186,6 +186,81 @@ test_workspace_creation_uses_canonical_sibling() {
         fail "canonical task worktree was not created at the resolved base ref"
 }
 
+test_workspace_creation_uses_repo_root_override() {
+    local tmp rig repo remote city provider canonical setup calls bd_subcommand
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' RETURN
+    rig="$tmp/rig"
+    repo="$tmp/repo"
+    remote="$tmp/repo-remote.git"
+    city="$tmp/city"
+    provider="$city/.gc/worktrees/demo/polecats/gmain.nux"
+    canonical="$city/.gc/worktrees/demo/artifacts/worktrees/ac-repo1"
+    setup="$tmp/workspace-create.sh"
+    calls="$tmp/gc-calls"
+    bd_subcommand=$(printf '%s%s' b d)
+
+    # The rig root holds the bead store; the binding works a different repository.
+    init_repo "$rig"
+    git -C "$rig" branch -M main
+    init_repo "$repo"
+    git -C "$repo" branch -M main
+    printf 'repo-only\n' >"$repo/repo-only.txt"
+    git -C "$repo" add repo-only.txt
+    git -C "$repo" commit -qm "repo-only fixture"
+    git init -q --bare "$remote"
+    git -C "$remote" symbolic-ref HEAD refs/heads/main
+    git -C "$repo" remote add origin "$remote"
+    git -C "$repo" push -qu origin main
+    mkdir -p "$(dirname "$provider")"
+    git -C "$repo" worktree add -qb provider-home "$provider" main
+    extract_workspace_creation "$setup"
+
+    (
+        gc() {
+            printf '%s\n' "$*" >>"$calls"
+            case "$*" in
+                "convoy status convoy-test --json")
+                    printf '%s\n' '{"children":[{"id":"ac-repo1"}]}'
+                    ;;
+                "$bd_subcommand show ac-repo1 --json")
+                    printf '%s\n' '[{"metadata":{}}]'
+                    ;;
+                "$bd_subcommand update ac-repo1 --set-metadata artifact_dir="*)
+                    return 0
+                    ;;
+                "$bd_subcommand update ac-repo1 --unset-metadata handoff_stage" | \
+                "$bd_subcommand update ac-repo1 --set-metadata base_ref="*)
+                    return 0
+                    ;;
+                "runtime drain-ack")
+                    fail "repo-root workspace creation unexpectedly drain-acked"
+                    ;;
+                *)
+                    fail "unexpected gc call during repo-root workspace creation: $*"
+                    ;;
+            esac
+        }
+        export GC_CITY_PATH="$city"
+        export GC_RIG=demo
+        export GC_RIG_ROOT="$rig"
+        export GC_REPO_ROOT="$repo"
+        cd "$provider"
+        # shellcheck source=/dev/null
+        source "$setup"
+    )
+
+    [[ -e "$canonical/.git" ]] ||
+        fail "formula did not create the task worktree when GC_REPO_ROOT is set"
+    [[ "$(git -C "$canonical" rev-parse --path-format=absolute --git-common-dir)" == \
+       "$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)" ]] ||
+        fail "task worktree was not created from GC_REPO_ROOT"
+    [[ -f "$canonical/repo-only.txt" ]] ||
+        fail "task worktree does not contain the GC_REPO_ROOT repository content"
+    [[ "$(git -C "$canonical" rev-parse HEAD)" == "$(git -C "$repo" rev-parse refs/remotes/origin/main)" ]] ||
+        fail "repo-root task worktree was not created at the repository's origin/main"
+}
+
 test_worktree_setup_ignores_gc_without_mutating_tracked_or_global_ignores() {
     local tmp rig city provider global_config global_ignore exclude
     local tracked_before config_before global_before status
@@ -1017,6 +1092,73 @@ test_cleanup_command_is_idempotent_and_mr_retryable() {
         fail "no-argument cleanup did not query the durable pending queue"
 }
 
+test_cleanup_sweep_scopes_to_repo_root() {
+    local tmp rig repo rig_remote repo_remote city bin bead_json calls
+    local rig_artifact repo_artifact rig_sha repo_sha
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' RETURN
+    rig="$tmp/rig"
+    repo="$tmp/repo"
+    rig_remote="$tmp/rig-remote.git"
+    repo_remote="$tmp/repo-remote.git"
+    city="$tmp/city"
+    rig_artifact="$city/.gc/worktrees/demo/artifacts/worktrees/ac-rigwork"
+    repo_artifact="$city/.gc/worktrees/demo/artifacts/worktrees/ac-repowork"
+    bin="$tmp/bin"
+    bead_json="$tmp/bead.json"
+    calls="$tmp/calls"
+
+    # One rig, two bindings: the rig repository and a second repository
+    # (GC_REPO_ROOT) both leave pending artifacts in the rig's namespace.
+    for pair in "$rig:$rig_remote" "$repo:$repo_remote"; do
+        init_repo "${pair%%:*}"
+        git -C "${pair%%:*}" branch -M main
+        git init -q --bare "${pair#*:}"
+        git -C "${pair#*:}" symbolic-ref HEAD refs/heads/main
+        git -C "${pair%%:*}" remote add origin "${pair#*:}"
+        git -C "${pair%%:*}" push -qu origin main
+    done
+    mkdir -p "$(dirname "$rig_artifact")" "$city/.gc/worktrees/demo/polecats"
+    git -C "$rig" worktree add -q --detach "$rig_artifact" HEAD
+    rig_sha=$(git -C "$rig_artifact" rev-parse HEAD)
+    git -C "$rig" push -qu origin HEAD:refs/heads/polecat/ac-rigwork
+    git -C "$repo" worktree add -q --detach "$repo_artifact" HEAD
+    repo_sha=$(git -C "$repo_artifact" rev-parse HEAD)
+    git -C "$repo" push -qu origin HEAD:refs/heads/polecat/ac-repowork
+    write_cleanup_gc_stub "$bin"
+
+    write_cleanup_bead_json \
+        "$bead_json.rig" ac-rigwork closed mr_merged "$rig_sha" "$rig_artifact" pending
+    write_cleanup_bead_json \
+        "$bead_json.repo" ac-repowork closed mr_merged "$repo_sha" "$repo_artifact" pending
+    jq -s '[(.[0][0] | .updated_at = "2026-07-26T18:00:00Z"),
+            (.[1][0] | .updated_at = "2026-07-26T19:00:00Z")]' \
+        "$bead_json.rig" "$bead_json.repo" >"$bead_json"
+
+    # The repo binding skips the older rig-repository row instead of
+    # blocking on it, and retires its own artifact.
+    : >"$calls"
+    GC_STUB_BEAD_JSON="$bead_json" GC_STUB_CALLS="$calls" \
+        GC_CITY_PATH="$city" GC_RIG=demo GC_RIG_ROOT="$rig" GC_REPO_ROOT="$repo" \
+        PATH="$bin:$PATH" "$ARTIFACT_CLEANUP"
+    [[ ! -e "$repo_artifact" ]] ||
+        fail "GC_REPO_ROOT sweep did not retire its own repository's artifact"
+    [[ -d "$rig_artifact" ]] ||
+        fail "GC_REPO_ROOT sweep removed another repository's artifact"
+    ! grep -qF 'show ac-rigwork --json' "$calls" ||
+        fail "GC_REPO_ROOT sweep selected another repository's pending row"
+
+    # Without GC_REPO_ROOT the rig binding keeps retiring rig-repository rows.
+    jq '[.[0]]' "$bead_json" >"$bead_json.next"
+    mv "$bead_json.next" "$bead_json"
+    : >"$calls"
+    GC_STUB_BEAD_JSON="$bead_json" GC_STUB_CALLS="$calls" \
+        GC_CITY_PATH="$city" GC_RIG=demo GC_RIG_ROOT="$rig" \
+        PATH="$bin:$PATH" "$ARTIFACT_CLEANUP"
+    [[ ! -e "$rig_artifact" ]] ||
+        fail "rig-root sweep did not retire the rig repository's artifact"
+}
+
 test_cleanup_command_rejects_cross_city_and_dirty_artifacts() {
     local tmp rig city_a city_b cross_city cross_rig wrong_namespace wrong_bead
     local symlink_path symlink_target foreign dirty provider legacy
@@ -1486,6 +1628,60 @@ test_witness_status_failure_blocks_artifact_removal() {
         fail "witness status failure allowed artifact removal"
 }
 
+test_witness_safety_gate_reads_remote_from_repo_root() {
+    local tmp rig repo remote city artifact gate source_sha output
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' RETURN
+    rig="$tmp/rig"
+    repo="$tmp/repo"
+    remote="$tmp/repo-remote.git"
+    city="$tmp/city"
+    artifact="$city/.gc/worktrees/demo/artifacts/worktrees/ac-repo"
+    gate="$tmp/witness-artifact-safety-gate.sh"
+    output="$tmp/output"
+
+    # The rig root holds the bead store and has no origin; the binding's
+    # repository (GC_REPO_ROOT) carries the pushed branch.
+    init_repo "$rig"
+    init_repo "$repo"
+    git -C "$repo" branch -M main
+    git init -q --bare "$remote"
+    git -C "$remote" symbolic-ref HEAD refs/heads/main
+    git -C "$repo" remote add origin "$remote"
+    git -C "$repo" push -qu origin main
+    mkdir -p "$(dirname "$artifact")"
+    git -C "$repo" worktree add -q --detach "$artifact" origin/main
+    source_sha=$(git -C "$artifact" rev-parse HEAD)
+    git -C "$repo" push -qu origin "$source_sha:refs/heads/polecat/ac-repo"
+
+    extract_witness_artifact_safety_gate "$gate"
+    (
+        GC_CITY_PATH="$city"
+        GC_RIG=demo
+        GC_RIG_ROOT="$rig"
+        GC_REPO_ROOT="$repo"
+        RECOVERY_MODE=reset
+        RECOVERY_BLOCKED=false
+        WORKTREE="$artifact"
+        CURRENT_CANONICAL_ARTIFACT="$artifact"
+        CURRENT_ARTIFACT="$artifact"
+        BRANCH=polecat/ac-repo
+        validate_recovery_artifact_worktree() {
+            printf '%s\n' "$1"
+        }
+        gc() {
+            printf 'mail=%s\n' "$*"
+        }
+        # shellcheck source=/dev/null
+        source "$gate"
+        printf 'artifact_safe=%s recovery_blocked=%s\n' \
+            "$ARTIFACT_SAFE" "$RECOVERY_BLOCKED"
+    ) >"$output" 2>&1
+
+    rg -q '^artifact_safe=true recovery_blocked=false$' "$output" ||
+        fail "witness safety gate did not read the pushed branch from GC_REPO_ROOT: $(cat "$output")"
+}
+
 test_metadata_migration_and_consumers_are_canonical_first() {
     python3 - \
         "$POLECAT_FORMULA" \
@@ -1575,10 +1771,10 @@ for fragment in (
     "--unset-metadata work_dir",
     'git ls-remote --exit-code --heads origin "refs/heads/$BRANCH"',
     'merge-base --is-ancestor',
-    'git -C "$GC_RIG_ROOT" worktree remove "$WORKTREE"',
+    'git -C "${GC_REPO_ROOT:-$GC_RIG_ROOT}" worktree remove "$WORKTREE"',
     "confirm_orphan_still_unowned",
     "Canonical artifact metadata is present but invalid",
-    'cd "$GC_RIG_ROOT"',
+    'cd "${GC_REPO_ROOT:-$GC_RIG_ROOT}"',
     'rig_namespace="$city_real/.gc/worktrees/$rig_name"',
     'provider_root" = "$rig_namespace_real/polecats',
     'WORKTREE_STATUS=$(git -C "$WORKTREE" status --porcelain)',
@@ -1701,6 +1897,7 @@ PY
 
 test_validator_rejects_provider_and_unrelated_paths
 test_workspace_creation_uses_canonical_sibling
+test_workspace_creation_uses_repo_root_override
 test_workspace_metadata_reads_fail_closed_without_pipefail
 test_workspace_collision_fails_closed_without_alternate
 test_workspace_rejects_redirected_artifact_root_before_creation
@@ -1709,10 +1906,12 @@ test_worktree_sync_ignores_codex_skills_but_rejects_unrelated_dirt
 test_worktree_sync_preserves_task_state_and_only_fast_forwards_stable_branch
 test_shutdown_probe_scopes_rig_and_fails_closed
 test_cleanup_command_is_idempotent_and_mr_retryable
+test_cleanup_sweep_scopes_to_repo_root
 test_cleanup_command_rejects_cross_city_and_dirty_artifacts
 test_cleanup_requires_live_remote_evidence_and_stable_state
 test_git_status_failures_preserve_artifacts_and_provider_state
 test_witness_status_failure_blocks_artifact_removal
+test_witness_safety_gate_reads_remote_from_repo_root
 if rg -n 'worktree remove .*--force' "$ARTIFACT_CLEANUP" >/dev/null; then
     fail "artifact cleanup contains a force-removal path"
 fi
