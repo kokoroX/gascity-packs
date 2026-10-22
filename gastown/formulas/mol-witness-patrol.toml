@@ -1,8 +1,12 @@
 description = """
 Witness patrol loop. Poured as a root-only wisp on startup:
 
-  gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{binding_prefix}}'
+  WISP=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{binding_prefix}}' --json | jq -r '.new_epic_id // empty')
   gc bd update $WISP --assignee=$GC_AGENT --status=in_progress
+
+`--json` prints one multi-line object on stdout and gc writes config
+advisories to stderr: pipe the whole stdout into jq, never through
+`2>&1`, `tail`, or `head`.
 
 `--status=in_progress` on the assign is load-bearing: `gc bd mol wisp` pours
 at status=open and `--assignee` alone does not transition it, so a wisp

@@ -199,6 +199,12 @@ if [ -z "$WISP" ] || ! gc bd update "$WISP" --assignee="$GC_AGENT" --status=in_p
 fi
 ```
 
+`gc bd mol wisp --json` prints one multi-line JSON object on stdout, and gc
+writes config advisories (`named_session ...`) to stderr. Pipe the whole
+stdout straight into `jq` as above. Never add `2>&1`, `tail`, or `head` to a
+`--json` pipeline: jq then sees a fragment, the ID comes back empty, and the
+wisp that was just poured is left unassigned.
+
 Then follow the formula. The step descriptions below are your instructions —
 work through them in order. On crash or restart, re-read the steps and
 determine where you left off from context (git state, bead state).
@@ -364,7 +370,7 @@ alert the witness, not `gc mail send`.
 
 | Want to... | Correct command |
 |------------|----------------|
-| Pour next wisp | `gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }}` |
+| Pour next wisp | `NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json \| jq -r '.new_epic_id // empty')` |
 | Burn current wisp | Follow Patrol Lifecycle Discipline Rule 1: pour next wisp, validate `NEXT`, assign it to `$GC_AGENT`, then burn `$CURRENT_WISP`. Never run a standalone burn. |
 | Find assigned work | `gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee="$GC_AGENT" --status=open,in_progress` — both statuses, comma-separated: a bead you already claimed is in_progress, and a query filtered to open alone can never see it again |
 | Reconcile pending PR | `gc gastown pr-merge-reconcile` |

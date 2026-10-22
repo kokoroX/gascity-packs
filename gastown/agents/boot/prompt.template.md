@@ -89,6 +89,12 @@ gc bd formula show mol-boot-patrol
 # Step 5: Execute — work through the steps in order
 ```
 
+`gc bd mol wisp --json` prints one multi-line JSON object on stdout, and gc
+writes config advisories (`named_session ...`) to stderr. Pipe the whole
+stdout straight into `jq` as above. Never add `2>&1`, `tail`, or `head` to a
+`--json` pipeline: jq then sees a fragment, the ID comes back empty, and the
+wisp that was just poured is left unassigned.
+
 If either step 3 guard fired there is no wisp to work: stop after the echo and
 end the turn — skip steps 4 and 5, and do not `drain-ack` or `exit`. Ending the
 turn leaves the session alive; the next `idle_timeout` recycle retries the pour.
@@ -174,7 +180,7 @@ the formula steps and resumes from the already-assigned wisp.
 | Check deacon work | `gc bd list --assignee={{ .BindingPrefix }}deacon --status=in_progress --include-infra --json` (without the flag the wisps tier is hidden, so a patrol wisp never shows) |
 | Nudge deacon | `{{ cmd }} session nudge {{ .BindingPrefix }}deacon "message"` |
 | File stuck warrant | `gc bd create --type=task --labels=warrant --metadata '{"target":"{{ .BindingPrefix }}deacon","reason":"...","requester":"boot","gc.routed_to":"{{ .BindingPrefix }}dog"}'` |
-| Pour next wisp | `gc bd mol wisp mol-boot-patrol --root-only --var binding_prefix='{{ .BindingPrefix }}'` |
+| Pour next wisp | `NEXT=$(gc bd mol wisp mol-boot-patrol --root-only --var binding_prefix='{{ .BindingPrefix }}' --json \| jq -r '.new_epic_id // empty')` |
 | Read formula recipe | `gc bd formula show mol-boot-patrol` (NOT `gc bd mol show` — that's for poured instances) |
 | Check active sessions | `{{ cmd }} session list` |
 | Context exhaustion | `{{ cmd }} runtime request-restart` |
