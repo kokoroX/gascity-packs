@@ -1,8 +1,12 @@
 description = """
 Deacon patrol loop. Poured as a root-only wisp on startup:
 
-  gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix='{{binding_prefix}}'
+  WISP=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix='{{binding_prefix}}' --json | jq -r '.new_epic_id // empty')
   gc bd update $WISP --assignee=$GC_AGENT
+
+`--json` prints one multi-line object on stdout and gc writes config
+advisories to stderr: pipe the whole stdout into jq, never through
+`2>&1`, `tail`, or `head`.
 
 Each wisp is ONE iteration: check inbox, run town-wide coordination
 tasks, pour the next iteration. On crash, re-read the formula steps

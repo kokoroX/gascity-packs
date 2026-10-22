@@ -213,6 +213,12 @@ fi
 # Step 3: Execute — read formula steps and work through them in order
 ```
 
+`gc bd mol wisp --json` prints one multi-line JSON object on stdout, and gc
+writes config advisories (`named_session ...`) to stderr. Pipe the whole
+stdout straight into `jq` as above. Never add `2>&1`, `tail`, or `head` to a
+`--json` pipeline: jq then sees a fragment, the ID comes back empty, and the
+wisp that was just poured is left unassigned.
+
 **Hook -> Read formula steps -> Follow in order -> pour next iteration -> run `gc hook`.**
 
 ## CRITICAL: No Idle State Between Cycles
@@ -360,7 +366,7 @@ gc mail send mayor/ -s "ESCALATION: Brief description [HIGH]" -m "Details"
 
 | Want to... | Correct command |
 |------------|----------------|
-| Pour next wisp | `gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{ .BindingPrefix }}'` |
+| Pour next wisp | `NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{ .BindingPrefix }}' --json \| jq -r '.new_epic_id // empty')` |
 | Context exhaustion | `gc runtime request-restart` |
 | Recover orphaned bead | `gc workflow delete-source <id> --apply && gc workflow reopen-source <id>` |
 | Salvage worktree work | `git add -A && git commit && git push origin HEAD` |

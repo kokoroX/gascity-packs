@@ -705,6 +705,55 @@ test_refinery_rebase_guidance_matches_the_guarded_step() {
         fail "the refinery prompt's Sequential Rebase Protocol still states a categorical rebase MUST; scope it to the diverged case so it cannot override the rebase step's skip arm"
 }
 
+test_patrol_wisp_pours_parse_full_json_stdout() {
+    local asset line pipeline var id total=0
+    local wisp_json='{
+  "created": 1,
+  "id_mapping": {
+    "mol-test-patrol": "TEST-wisp-abc"
+  },
+  "new_epic_id": "TEST-wisp-abc",
+  "phase": "vapor",
+  "schema_version": 1
+}'
+    local advisory='named_session "gastown.mayor": mode "always" with wake_mode "fresh" on template "gastown.mayor" starts a fresh provider session after every drain; use only for a deliberate restart-per-cycle actor'
+
+    # `gc bd mol wisp --json` pretty-prints a multi-line object on stdout while
+    # gc writes config advisories to stderr. A pour that merges stderr or keeps
+    # only the last line hands jq a fragment, so the ID comes back empty and the
+    # freshly poured wisp is left unassigned. Every documented patrol pour,
+    # including formula descriptions and quick-reference rows, must capture the
+    # ID from the whole stdout.
+    while IFS= read -r asset; do
+        while IFS= read -r line; do
+            total=$((total + 1))
+            # Quick-reference table rows escape the pipe as \| inside code spans.
+            line=${line//\\|/|}
+            [[ "$line" == *'--json'* ]] ||
+                fail "patrol pour must request --json so the new wisp ID can be captured: $asset: $line"
+            ! printf '%s\n' "$line" | grep -Eq '2>&1|\|[[:space:]]*(tail|head)' ||
+                fail "patrol pour must pipe its whole --json stdout to jq, without 2>&1, tail, or head: $asset: $line"
+            pipeline=$(printf '%s\n' "$line" | grep -oE "[A-Z_]+=\\\$\\(gc bd mol wisp mol-[a-z-]+-patrol [^\`]*'\\)") ||
+                fail "patrol pour must capture the new wisp ID into a variable: $asset: $line"
+            var=${pipeline%%=*}
+
+            id=$( (gc() { printf '%s\n' "$advisory" >&2; printf '%s\n' "$wisp_json"; }
+                eval "$pipeline"; printf '%s' "${!var}") 2>/dev/null) || true
+            [[ "$id" == "TEST-wisp-abc" ]] ||
+                fail "patrol pour must parse new_epic_id from multi-line --json stdout with advisories on stderr (got '$id'): $asset: $line"
+
+            # A failed pour reports an error object without new_epic_id; the ID
+            # must come back empty so the caller's guard fires, never "null".
+            id=$( (gc() { printf '%s\n' "$advisory" >&2; printf '%s\n' '{"error": "pour failed"}'; return 1; }
+                eval "$pipeline"; printf '%s' "${!var}") 2>/dev/null) || true
+            [[ -z "$id" ]] ||
+                fail "failed patrol pour must leave the wisp ID empty (got '$id'): $asset: $line"
+        done < <(grep -E 'gc bd mol wisp mol-[a-z-]+-patrol' "$asset" || true)
+    done < <(find "$GASTOWN/agents" "$GASTOWN/formulas" "$GASTOWN/template-fragments" -type f \( -name '*.md' -o -name '*.toml' \) | sort)
+
+    [[ "$total" -gt 0 ]] || fail "no patrol wisp pours found; the pour check scanned nothing"
+}
+
 test_prime_prompts_are_city_generic_and_compact() {
     local mayor propulsion awareness
     mayor="$GASTOWN/agents/mayor/prompt.template.md"
@@ -829,6 +878,7 @@ test_prime_prompts_are_city_generic_and_compact
 test_witness_wisp_queries_pin_include_infra
 test_witness_wisp_reconcile_excludes_current
 test_refinery_wisp_lifecycle
+test_patrol_wisp_pours_parse_full_json_stdout
 test_witness_handoff_recovery_is_guarded_and_fail_closed
 test_boot_wisp_queries_pin_include_infra
 test_boot_patrol_burn_resolves_current_wisp
