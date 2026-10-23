@@ -66,10 +66,19 @@ formula_path = pathlib.Path(sys.argv[1])
 output_path = pathlib.Path(sys.argv[2])
 with formula_path.open("rb") as handle:
     formula = tomllib.load(handle)
-recovery = next(
-    step for step in formula["steps"] if step["id"] == "recover-orphaned-beads"
+# The recovery recipe is split across the steps of the recovery branch, so a
+# sentinel is looked up across all of them rather than in one step id.
+RECOVERY_STEP_IDS = (
+    "recover-orphaned-beads",
+    "salvage-orphan-work",
+    "return-orphan-to-pool",
+    "report-orphan-recovery",
 )
-description = recovery["description"]
+description = "\n".join(
+    step["description"]
+    for step in formula["steps"]
+    if step["id"] in RECOVERY_STEP_IDS
+)
 begin = description.index("# BEGIN WITNESS_ARTIFACT_SAFETY_GATE")
 end = description.index("```", begin)
 block = description[begin:end].splitlines()[1:]
@@ -1763,7 +1772,19 @@ if canonical_guard > legacy_fallback:
 with witness_path.open("rb") as handle:
     witness = tomllib.load(handle)
 witness_description = witness["description"]
-recovery = next(step["description"] for step in witness["steps"] if step["id"] == "recover-orphaned-beads")
+# The recovery recipe is split across the steps of the recovery branch; the
+# contract below is over the branch as a whole, not over one step id.
+recovery = "\n".join(
+    step["description"]
+    for step in witness["steps"]
+    if step["id"]
+    in (
+        "recover-orphaned-beads",
+        "salvage-orphan-work",
+        "return-orphan-to-pool",
+        "report-orphan-recovery",
+    )
+)
 for fragment in (
     "metadata.artifact_dir",
     "validate_recovery_artifact_worktree",
