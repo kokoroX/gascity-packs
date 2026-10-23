@@ -17,8 +17,24 @@ Each wisp is ONE iteration: check for work, patrol, pour the next
 iteration. On crash, re-read the formula steps and determine where
 you left off from context (bead state, mail state, last action).
 
-Formula steps are NOT materialized as child beads. Read the step
-descriptions below and work through them in order.
+Formula steps are NOT materialized as child beads, so this formula is the
+only copy of a step. Read them ONE AT A TIME and never print the whole
+recipe. The running order (a few hundred bytes):
+
+  gc formula show mol-witness-patrol --json | jq -r '.steps[] | .id + " - " + (.title // "")'
+
+One step's body, when you reach that step (ids in that output are the formula
+name plus the step id, and the formula itself is one of the entries):
+
+  gc formula show mol-witness-patrol --json | jq -r '.steps[] | select(.id == "mol-witness-patrol.recover-orphaned-beads") | .description'
+
+The 67KB of JSON stays in the pipe; only jq's output reaches your context.
+A bare `gc formula show mol-witness-patrol --json`, a `Read` of the formula
+file, or reading either back out of a persisted-output file puts the entire
+recipe in your context, where every later call in the session pays for it
+again. Read a step's body when you get to it, and do not read the body of a
+step an earlier step told you to skip: `recover-orphaned-beads` ends the
+recovery branch on a healthy cycle, which is the normal case.
 
 The loop mechanism: EVERY step is one leg of the same wisp. Never exit
 the wisp from an intermediate step — either continue to the next step
@@ -320,6 +336,25 @@ a NEW session with a different ID — the old one never comes back.
 infrastructure agents (not pool instances) should be skipped — those
 agents have persistent identity and the controller manages their
 lifecycle directly.
+
+**No orphan candidates — the normal case — ends recovery here.** Skip
+`salvage-orphan-work`, `return-orphan-to-pool` and `report-orphan-recovery`
+without reading their descriptions, and continue to `check-refinery`. Those
+three steps only ever apply to a bead this step classified as an orphan
+candidate; reading them on a healthy cycle buys nothing and costs the whole
+recipe's context.
+
+**Exit criteria:** every assigned bead in this rig classified, or recovery
+aborted on an unusable map. Do NOT exit the wisp here — `next-iteration` is
+the only place that pours the next wisp and burns this one."""
+
+[[steps]]
+id = "salvage-orphan-work"
+title = "Salvage an orphaned bead's work from its worktree"
+needs = ["recover-orphaned-beads"]
+description = """
+Read this step only when `recover-orphaned-beads` classified at least one
+orphan candidate. With none, skip it and continue to `check-refinery`.
 
 **Step 2: For each orphaned bead, salvage work from the worktree.**
 
@@ -693,6 +728,20 @@ worktree exists, and no branch exists on origin.**
 Nothing to salvage. The bead goes back to pool and a new polecat
 starts fresh.
 
+**Exit criteria:** each orphan candidate has a validated `WORKTREE` (possibly
+empty), a `STILL_ORPHANED` verdict and its salvage case resolved. Continue to
+`return-orphan-to-pool`; do NOT exit the wisp here."""
+
+[[steps]]
+id = "return-orphan-to-pool"
+title = "Close, hand off or reset a salvaged orphan"
+needs = ["salvage-orphan-work"]
+description = """
+Read this step only for a bead `salvage-orphan-work` carried this far — it is
+reached with that step's `STILL_ORPHANED=true` verdict and validated
+`WORKTREE` in hand. All three destructive paths below re-state the verdict, so
+a step reached out of order still fails closed.
+
 **Step 3: Verify work on main before resetting.**
 
 Before resetting the bead to pool, check if the branch was already merged
@@ -1028,6 +1077,17 @@ else
   echo "Orphan ownership/artifact changed for <bead>; skipping cleanup and reset." >&2
 fi
 ```
+
+**Exit criteria:** every orphan candidate closed, handed off to the refinery,
+or reset to pool with its artifact cleaned. Continue to
+`report-orphan-recovery`; do NOT exit the wisp here."""
+
+[[steps]]
+id = "report-orphan-recovery"
+title = "Log and escalate what recovery did"
+needs = ["return-orphan-to-pool"]
+description = """
+Read this step only when recovery actually acted on a bead.
 
 **Step 4: Assess and notify.**
 
