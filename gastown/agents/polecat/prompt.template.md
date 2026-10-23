@@ -293,26 +293,52 @@ NEW session identity. If you wake into a session that context says was already
 mid-work on a claimed bead, your FIRST action — before touching code — is to
 re-check ownership against THIS session's identity:
 
-`$GC_BEAD_ID` is the convoy, not the work bead — derive the child work bead
-first (exactly as the done sequence does), then verify THAT bead's ownership:
+What you own is the bead this session claimed — `gc hook current` names it, and
+the claim block above made it `in_progress`, assigned it to you, and stamped
+`polecat_session`. During `mol-polecat-work` that is a formula step; the work
+bead itself stays `open` and unassigned until submit-and-exit hands it to the
+refinery, so its assignee says nothing about you. Verify the claim instead
+(`$GC_BEAD_ID` is not set in a session shell — do not use it):
 
 ```bash
+bash <<'GC_RESUME_CHECK'
+set +e
 EXPECTED_ASSIGNEE="${BEADS_ACTOR:-${GC_SESSION_NAME:-${GC_SESSION_ID:-${GC_AGENT:-}}}}"
-CONVOY_STATUS=$(gc convoy status "$GC_BEAD_ID" --json)
-WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
-if [ -z "$WORK_BEAD_ID" ]; then
-  echo "RESUME_INDETERMINATE convoy $GC_BEAD_ID has no single child work bead; re-claim instead of guessing."
+META='(.[0].metadata // {}) | if type == "string" then (fromjson? // {}) else . end'
+CLAIM_ID=""
+STATUS=""
+ASSIGNEE=""
+SESSION_TAG=""
+READ_OK=0
+READ_TRY=0
+while [ "$READ_TRY" -lt 3 ]; do
+  READ_TRY=$((READ_TRY + 1))
+  CLAIM_ID=$(gc hook current --id-only 2>/dev/null)
+  if [ -n "$CLAIM_ID" ]; then
+    CLAIM_JSON=$(gc bd show "$CLAIM_ID" --json 2>/dev/null)
+    SHOW_CODE=$?
+    STATUS=$(printf '%s' "$CLAIM_JSON" | jq -r '.[0].status // empty' 2>/dev/null)
+    ASSIGNEE=$(printf '%s' "$CLAIM_JSON" | jq -r '.[0].assignee // empty' 2>/dev/null)
+    SESSION_TAG=$(printf '%s' "$CLAIM_JSON" | jq -r "$META | .polecat_session // empty" 2>/dev/null)
+    if [ "$SHOW_CODE" -eq 0 ] && [ -n "$STATUS" ]; then
+      READ_OK=1
+      break
+    fi
+  fi
+  sleep 1
+done
+if [ "$READ_OK" -ne 1 ]; then
+  echo "RESUME_INDETERMINATE no readable claim for $EXPECTED_ASSIGNEE; re-claim instead of guessing."
   gc runtime drain-ack
   exit 0
 fi
-WORK_JSON=$(gc bd show "$WORK_BEAD_ID" --json)
-ASSIGNEE=$(printf '%s' "$WORK_JSON" | jq -r '.[0].assignee // empty')
-SESSION_TAG=$(printf '%s' "$WORK_JSON" | jq -r '.[0].metadata.polecat_session // empty')
-if [ "$ASSIGNEE" != "$EXPECTED_ASSIGNEE" ] || { [ -n "$SESSION_TAG" ] && [ "$SESSION_TAG" != "$EXPECTED_ASSIGNEE" ]; }; then
-  echo "OWNERSHIP_LOST $WORK_BEAD_ID assignee=$ASSIGNEE session=$SESSION_TAG, not $EXPECTED_ASSIGNEE. Stopping."
+if [ "$STATUS" != "in_progress" ] || [ "$ASSIGNEE" != "$EXPECTED_ASSIGNEE" ] || { [ -n "$SESSION_TAG" ] && [ "$SESSION_TAG" != "$EXPECTED_ASSIGNEE" ]; }; then
+  echo "OWNERSHIP_LOST $CLAIM_ID status=$STATUS assignee=$ASSIGNEE session=$SESSION_TAG, not $EXPECTED_ASSIGNEE. Stopping."
   gc runtime drain-ack
   exit 0
 fi
+echo "OWNERSHIP_OK $CLAIM_ID"
+GC_RESUME_CHECK
 ```
 
 If ownership was lost, another agent owns the work now — STOP and drain. Do not
@@ -414,35 +440,60 @@ Nudges from other agents may arrive via your hook. When working:
 done sequence — branch-shape gate, push + push-verify, metadata, refinery
 reassignment, wake/nudge, and drain all live there. Run that step.
 
-**Do NOT run submit-and-exit twice** (double push, double reassign, double
-refinery wake is a bug). Do not trust memory for this — check mechanically.
-Derive the work bead from your convoy exactly as the formula's workspace-setup
-step does (never pass a bare or guessed id to `bd`, which fuzzy-matches and can
-reassign the wrong bead); `$GC_BEAD_ID` is the convoy the molecule was poured
-on. If a clean read shows the work bead is no longer `in_progress` for this
-session, submit-and-exit already ran — drain and exit. Otherwise run it:
+**Do NOT run submit-and-exit twice** — running the done sequence twice is a bug.
+Do not trust memory for this; check mechanically with the block below, run as
+ONE Bash command before submit-and-exit. It finds the work bead from this
+session's own claim (claimed step → `gc.root_bead_id` → `gc.input_convoy_id` →
+the convoy's single child), never from a bare or guessed id — `bd` fuzzy-matches
+and can reassign the wrong bead — and never from `$GC_BEAD_ID`, which is not set
+in a session shell.
+
+The work bead is not yours during `mol-polecat-work`: you claim its steps, and
+the bead itself stays `open` and unassigned until submit-and-exit step 6 hands
+it to the refinery. So the signal that the done sequence already ran is the
+handoff itself, not lost ownership:
+
+- `ALREADY_SUBMITTED` — the bead is closed or assigned to the refinery. The
+  block closes this step and drains.
+- `HANDOFF_INCOMPLETE` — step 5 recorded `handoff_stage=target_recorded` but
+  step 6 never reassigned the bead. The block finishes steps 6–8 and drains.
+- `SUBMIT_REQUIRED` — anything else, including a state it could not read after
+  retries. Run submit-and-exit from step 1.
 
 ```bash
-EXPECTED_ASSIGNEE="${BEADS_ACTOR:-${GC_SESSION_NAME:-${GC_SESSION_ID:-${GC_AGENT:-}}}}"
-# Read the convoy + work bead with retry — same unreadable-is-not-terminal
-# discipline as the claim block above. An unreadable state (empty JSON, a convoy
-# blip, or 0/>=2 children so WORK_BEAD_ID is empty) is NOT proof that
-# submit-and-exit already ran. Only a SUCCESSFUL read showing the bead genuinely
-# moved off this session (closed, or reassigned to refinery) means it is done.
+bash <<'GC_SUBMIT_GUARD'
+set +e
+REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery"
+# Ledgers may serve metadata as an object or as a JSON string; read both.
+META='(.[0].metadata // {}) | if type == "string" then (fromjson? // {}) else . end'
+STEP_BEAD_ID=""
 WORK_BEAD_ID=""
 WORK_STATUS=""
 WORK_ASSIGNEE=""
+WORK_STAGE=""
 READ_OK=0
 READ_TRY=0
 while [ "$READ_TRY" -lt 3 ]; do
   READ_TRY=$((READ_TRY + 1))
-  CONVOY_STATUS=$(gc convoy status "$GC_BEAD_ID" --json 2>/dev/null)
-  WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end' 2>/dev/null)
+  ROOT_ID=""
+  CONVOY_ID=""
+  WORK_BEAD_ID=""
+  STEP_BEAD_ID=$(gc hook current --id-only 2>/dev/null)
+  if [ -n "$STEP_BEAD_ID" ]; then
+    ROOT_ID=$(gc bd show "$STEP_BEAD_ID" --json 2>/dev/null | jq -r "$META | .[\"gc.root_bead_id\"] // empty" 2>/dev/null)
+  fi
+  if [ -n "$ROOT_ID" ]; then
+    CONVOY_ID=$(gc bd show "$ROOT_ID" --json 2>/dev/null | jq -r "$META | .[\"gc.input_convoy_id\"] // empty" 2>/dev/null)
+  fi
+  if [ -n "$CONVOY_ID" ]; then
+    WORK_BEAD_ID=$(gc convoy status "$CONVOY_ID" --json 2>/dev/null | jq -r 'if (.children | length) == 1 then .children[0].id else empty end' 2>/dev/null)
+  fi
   if [ -n "$WORK_BEAD_ID" ]; then
     WORK_JSON=$(gc bd show "$WORK_BEAD_ID" --json 2>/dev/null)
     SHOW_CODE=$?
     WORK_STATUS=$(printf '%s' "$WORK_JSON" | jq -r '.[0].status // empty' 2>/dev/null)
     WORK_ASSIGNEE=$(printf '%s' "$WORK_JSON" | jq -r '.[0].assignee // empty' 2>/dev/null)
+    WORK_STAGE=$(printf '%s' "$WORK_JSON" | jq -r "$META | .handoff_stage // empty" 2>/dev/null)
     if [ "$SHOW_CODE" -eq 0 ] && [ -n "$WORK_STATUS" ]; then
       READ_OK=1
       break
@@ -450,15 +501,34 @@ while [ "$READ_TRY" -lt 3 ]; do
   fi
   sleep 1
 done
-if [ "$READ_OK" -eq 1 ] && { [ "$WORK_STATUS" != "in_progress" ] || [ "$WORK_ASSIGNEE" != "$EXPECTED_ASSIGNEE" ]; }; then
-  echo "ALREADY_SUBMITTED $WORK_BEAD_ID status=$WORK_STATUS assignee=$WORK_ASSIGNEE — submit-and-exit already ran; draining."
+
+# Same close-then-drain as submit-and-exit step 8: drain-ack gives back every
+# claim this session still holds, so an unclosed step would be re-poured.
+close_step_and_drain() {
+  STEP_BEAD=$(gc bd show "$STEP_BEAD_ID" --json) || exit 1
+  printf '%s' "$STEP_BEAD" | jq -e '(if type == "array" then .[0] else . end) | .status == "in_progress" and ((.metadata["gc.step_ref"] // "") | endswith(".submit-and-exit"))' >/dev/null || { echo "submit guard: current claim $STEP_BEAD_ID is not the in-progress submit-and-exit step; not acknowledging drain" >&2; exit 1; }
+  gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=pass --status=closed || exit 1
   gc runtime drain-ack
-  exit
+  exit 0
+}
+
+if [ "$READ_OK" -eq 1 ] && { [ "$WORK_STATUS" = "closed" ] || [ "$WORK_ASSIGNEE" = "$REFINERY_TARGET" ]; }; then
+  echo "ALREADY_SUBMITTED $WORK_BEAD_ID status=$WORK_STATUS assignee=$WORK_ASSIGNEE — closing $STEP_BEAD_ID and draining."
+  close_step_and_drain
 fi
-# Unreadable after retries, or still in_progress for this session: DO NOT assume
-# already-submitted — fall through and run submit-and-exit. A stranded
-# in_progress bead with an unpushed branch is the worse outcome.
+if [ "$READ_OK" -eq 1 ] && [ "$WORK_STAGE" = "target_recorded" ]; then
+  echo "HANDOFF_INCOMPLETE $WORK_BEAD_ID status=$WORK_STATUS assignee=$WORK_ASSIGNEE — finishing submit-and-exit steps 6-8."
+  gc bd update "$WORK_BEAD_ID" --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="" || exit 1
+  gc session wake "$REFINERY_TARGET" || true
+  gc session nudge "$REFINERY_TARGET" "Run 'gc prime' to check merge queue and begin processing." || true
+  close_step_and_drain
+fi
+echo "SUBMIT_REQUIRED work=${WORK_BEAD_ID:-unknown} status=${WORK_STATUS:-unknown} assignee=${WORK_ASSIGNEE:-none} read_ok=$READ_OK — run submit-and-exit from step 1."
+GC_SUBMIT_GUARD
 ```
+
+An unreadable state is never proof that the done sequence ran: a stranded bead
+with an unpushed branch is the worse outcome, so `SUBMIT_REQUIRED` covers it.
 
 The push gate lives inside submit-and-exit; the "No Idle Polecats" fragment
 above covers it. It fails closed: `auto_push=false` (or `no`/`0`, any case)
