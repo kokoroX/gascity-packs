@@ -713,6 +713,26 @@ if [ "$CURRENT_BRANCH" != "$EXPECTED_BRANCH" ]; then
     echo "  - Re-run submit-and-exit"
     echo ""
     echo "Do NOT proceed past this gate."
+    echo ""
+    echo "The bead goes back to the pool with this gate failure recorded; do not"
+    echo "re-run submit-and-exit from this session, whose claim is released below."
+    gc bd update "$WORK_BEAD_ID" \
+      --status=open --assignee="" \
+      --set-metadata gc.routed_to="" \
+      --set-metadata halt_reason=branch_shape_gate \
+      --append-notes "Halted at submit (branch_shape_gate): no handoff stamped.
+  current branch:  $CURRENT_BRANCH
+  expected branch: $EXPECTED_BRANCH
+  base_ref:        $BASE_REF
+Recover by re-running the workspace-setup step: let it validate or create
+metadata.artifact_dir, preserve the existing branch and its commits, and
+reconcile them onto '$EXPECTED_BRANCH' based on the recorded base ref
+'$BASE_REF' (metadata.base_ref, not a re-guessed base) without deleting either
+ref; then re-run submit-and-exit."
+    for ESCALATE_TARGET in mayor "${GC_RIG:+$GC_RIG/}{{binding_prefix}}witness"; do
+      gc session nudge "$ESCALATE_TARGET" "BRANCH SHAPE GATE FAILED: $WORK_BEAD_ID is on '$CURRENT_BRANCH', expected '$EXPECTED_BRANCH' — no handoff stamped; bead returned to the pool open and unassigned. Needs a coordinator decision." \
+        || echo "WARNING: could not nudge $ESCALATE_TARGET about $WORK_BEAD_ID; escalate by hand."
+    done
     STEP_BEAD_ID=$(gc hook current --id-only) || exit 1  # drain-ack gives back every claim this session still holds, so close this step first
     STEP_BEAD=$(gc bd show "$STEP_BEAD_ID" --json) || exit 1
     printf '%s' "$STEP_BEAD" | jq -e '(if type == "array" then .[0] else . end) | .status == "in_progress" and ((.metadata["gc.step_ref"] // "") | endswith(".submit-and-exit"))' >/dev/null || { echo "submit-and-exit: current claim $STEP_BEAD_ID is not this in-progress step; not acknowledging drain" >&2; exit 1; }
