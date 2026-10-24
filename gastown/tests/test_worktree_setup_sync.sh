@@ -110,11 +110,128 @@ test_sync_still_works_with_configured_tracking() {
         fail "sync should have kept the worktree on $branch"
 }
 
+test_sync_skips_unique_stable_branch_work() {
+    local base="$1/unique" rig="$1/unique/rig" wt="$1/unique/wt"
+    local branch before_sha after_sha fakebin event_log stderr_file
+    mkdir -p "$base"
+    new_upstream_and_rig "$base"
+    branch=$(stable_branch "$rig" "$wt" unique)
+    git_c -C "$rig" worktree add -q "$wt" -b "$branch" refs/remotes/origin/main
+    git_c -C "$wt" commit -q --allow-empty -m "unique work"
+    before_sha=$(git_c -C "$wt" rev-parse HEAD)
+
+    fakebin="$base/fakebin"
+    event_log="$base/gc.log"
+    stderr_file="$base/stderr"
+    mkdir -p "$fakebin"
+    cat > "$fakebin/gc" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$GC_EVENT_LOG"
+exit 1
+EOF
+    chmod +x "$fakebin/gc"
+    if PATH="$fakebin:$PATH" GC_EVENT_LOG="$event_log" sh "$SCRIPT" "$rig" "$wt" unique --sync 2>"$stderr_file"; then
+        :
+    else
+        fail "unique stable-branch work should skip sync successfully"
+    fi
+    after_sha=$(git_c -C "$wt" rev-parse HEAD)
+    [ "$after_sha" = "$before_sha" ] ||
+        fail "unique stable-branch work should preserve HEAD; want $before_sha got $after_sha"
+    [ "$(git_c -C "$wt" branch --show-current)" = "$branch" ] ||
+        fail "unique stable-branch work should preserve branch $branch"
+    grep -qF "starting without sync" "$stderr_file" ||
+        fail "unique stable-branch work should explain sync was skipped"
+    grep -qF "event emit worktree-setup.sync_skipped" "$event_log" ||
+        fail "sync-skipped event should be attempted even when gc exits nonzero"
+}
+
+test_sync_skips_dirty_worktree() {
+    local base="$1/dirty" rig="$1/dirty/rig" wt="$1/dirty/wt"
+    local branch before_sha stderr_file
+    mkdir -p "$base"
+    new_upstream_and_rig "$base"
+    branch=$(stable_branch "$rig" "$wt" dirty)
+    git_c -C "$rig" worktree add -q "$wt" -b "$branch" refs/remotes/origin/main
+    printf 'tracked original\n' > "$wt/tracked.txt"
+    git_c -C "$wt" add tracked.txt
+    git_c -C "$wt" commit -q -m "tracked file"
+    printf 'tracked changed\n' > "$wt/tracked.txt"
+    printf 'untracked content\n' > "$wt/untracked.txt"
+    before_sha=$(git_c -C "$wt" rev-parse HEAD)
+    stderr_file="$base/stderr"
+
+    if sh "$SCRIPT" "$rig" "$wt" dirty --sync 2>"$stderr_file"; then
+        :
+    else
+        fail "dirty worktree should skip sync successfully"
+    fi
+    [ "$(git_c -C "$wt" rev-parse HEAD)" = "$before_sha" ] ||
+        fail "dirty worktree should preserve HEAD"
+    [ "$(git_c -C "$wt" branch --show-current)" = "$branch" ] ||
+        fail "dirty worktree should preserve branch $branch"
+    [ "$(<"$wt/tracked.txt")" = "tracked changed" ] ||
+        fail "dirty worktree should preserve tracked file contents"
+    [ "$(<"$wt/untracked.txt")" = "untracked content" ] ||
+        fail "dirty worktree should preserve untracked file contents"
+    grep -qF "starting without sync" "$stderr_file" ||
+        fail "dirty worktree should explain sync was skipped"
+}
+
+test_sync_skips_unreachable_detached_head() {
+    local base="$1/detached" rig="$1/detached/rig" wt="$1/detached/wt"
+    local branch detached_sha stderr_file
+    mkdir -p "$base"
+    new_upstream_and_rig "$base"
+    branch=$(stable_branch "$rig" "$wt" detached)
+    git_c -C "$rig" worktree add -q "$wt" -b "$branch" refs/remotes/origin/main
+    git_c -C "$wt" checkout -q --detach
+    git_c -C "$wt" commit -q --allow-empty -m "unreachable detached work"
+    detached_sha=$(git_c -C "$wt" rev-parse HEAD)
+    if git_c -C "$rig" for-each-ref --contains "$detached_sha" refs/heads refs/remotes | grep -q .; then
+        fail "test setup bug: detached commit must not be reachable from a ref"
+    fi
+    stderr_file="$base/stderr"
+
+    if sh "$SCRIPT" "$rig" "$wt" detached --sync 2>"$stderr_file"; then
+        :
+    else
+        fail "unreachable detached HEAD should skip sync successfully"
+    fi
+    [ "$(git_c -C "$wt" rev-parse HEAD)" = "$detached_sha" ] ||
+        fail "unreachable detached HEAD should be preserved"
+    [ -z "$(git_c -C "$wt" branch --show-current)" ] ||
+        fail "unreachable detached HEAD should remain detached"
+    grep -qF "starting without sync" "$stderr_file" ||
+        fail "unreachable detached HEAD should explain sync was skipped"
+}
+
+test_sync_still_fails_without_origin() {
+    local base="$1/no-origin" rig="$1/no-origin/rig" wt="$1/no-origin/wt"
+    local branch stderr_file
+    mkdir -p "$base"
+    new_upstream_and_rig "$base"
+    branch=$(stable_branch "$rig" "$wt" noorigin)
+    git_c -C "$rig" worktree add -q "$wt" -b "$branch" refs/remotes/origin/main
+    git_c -C "$wt" remote remove origin
+    stderr_file="$base/stderr"
+
+    if sh "$SCRIPT" "$rig" "$wt" noorigin --sync 2>"$stderr_file"; then
+        fail "sync without origin should still fail"
+    fi
+    grep -qF "without origin" "$stderr_file" ||
+        fail "missing-origin failure should retain its diagnostic"
+}
+
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 new_upstream_and_rig "$tmp"
 
 test_sync_pulls_when_branch_lacks_origin_tracking "$tmp"
 test_sync_still_works_with_configured_tracking "$tmp"
+test_sync_skips_unique_stable_branch_work "$tmp"
+test_sync_skips_dirty_worktree "$tmp"
+test_sync_skips_unreachable_detached_head "$tmp"
+test_sync_still_fails_without_origin "$tmp"
 
 echo "worktree-setup sync tests passed"

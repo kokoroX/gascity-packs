@@ -64,16 +64,29 @@ validate_existing_worktree() {
     [ "$WT_COMMON" = "$RIG_COMMON" ]
 }
 
+skip_sync() {
+    SKIP_REASON=$1
+    SKIP_DETAIL=$2
+    echo "worktree-setup: $SKIP_DETAIL; preserving it and starting without sync" >&2
+    if command -v gc >/dev/null 2>&1; then
+        gc event emit worktree-setup.sync_skipped --subject "$WT" \
+            --message "$SKIP_REASON: $SKIP_DETAIL" >/dev/null 2>&1 || true
+    fi
+}
+
 sync_worktree() {
     [ "$SYNC" = "--sync" ] || return 0
+
+    # pre_start failures are invisible to the agent and make the controller
+    # retry indefinitely; preserve the work and start so the agent can assess it.
 
     WT_STATUS=$(git -C "$WT" status --porcelain --untracked-files=all) || {
         echo "worktree-setup: could not inspect provider worktree status at $WT; refusing sync" >&2
         return 1
     }
     if [ -n "$WT_STATUS" ]; then
-        echo "worktree-setup: refusing to sync dirty provider worktree at $WT" >&2
-        return 1
+        skip_sync "dirty_worktree" "provider worktree at $WT is dirty"
+        return 0
     fi
     if ! git -C "$WT" remote get-url origin >/dev/null 2>&1; then
         echo "worktree-setup: refusing to sync provider worktree without origin at $WT" >&2
@@ -126,8 +139,8 @@ sync_worktree() {
             --format='%(refname)' --contains "$CURRENT_HEAD" \
             refs/heads refs/remotes | head -n 1)
         if [ -z "$REACHABLE_REF" ]; then
-            echo "worktree-setup: detached provider HEAD $CURRENT_HEAD is not ref-reachable; preserving it and refusing sync" >&2
-            return 1
+            skip_sync "detached_unreachable_head" "detached provider HEAD $CURRENT_HEAD is not ref-reachable"
+            return 0
         fi
     fi
 
@@ -137,8 +150,8 @@ sync_worktree() {
             git --no-replace-objects -C "$RIG_ROOT" merge-base \
                 --is-ancestor "refs/heads/$STABLE_BRANCH" "$DEFAULT_REF" \
                 2>/dev/null; then
-            echo "worktree-setup: stable provider branch $STABLE_BRANCH has unique or diverged work; preserving it and refusing sync" >&2
-            return 1
+            skip_sync "diverged_stable_branch" "stable provider branch $STABLE_BRANCH has unique or diverged work"
+            return 0
         fi
         if [ "$CURRENT_BRANCH" != "$STABLE_BRANCH" ]; then
             if ! git -C "$WT" checkout "$STABLE_BRANCH"; then
