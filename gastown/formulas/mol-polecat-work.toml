@@ -126,8 +126,16 @@ if git show-ref --verify --quiet "$BASE_REMOTE"; then
     if git show-ref --verify --quiet "$BASE_LOCAL" && ! git merge-base --is-ancestor "$BASE_LOCAL" "$BASE_REMOTE"; then
         echo "STOP: local {{base_branch}} is ahead of, or diverged from, the copy on origin."
         echo "Reconcile or push {{base_branch}} first; do not branch from a stale base."
-        gc bd update "$WORK_BEAD_ID" --set-metadata halt_reason=base_branch_diverged
+        gc bd update "$WORK_BEAD_ID" \
+          --status=open --assignee="" \
+          --set-metadata gc.routed_to="" \
+          --set-metadata halt_reason=base_branch_diverged \
+          --append-notes "Workspace halted: reconcile or push base branch {{base_branch}}, then re-sling this bead." || exit 1
         gc mail send "$WITNESS_TARGET" -s "polecat halted: base_branch_diverged ($WORK_BEAD_ID)" -m "Local {{base_branch}} is not an ancestor of the copy on origin; $WORK_BEAD_ID cannot pick a fork point. Reconcile the branch."
+        STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+        STEP_BEAD=$(gc bd show "$STEP_BEAD_ID" --json) || exit 1
+        printf '%s' "$STEP_BEAD" | jq -e '(if type == "array" then .[0] else . end) | .status == "in_progress" and ((.metadata["gc.step_ref"] // "") | endswith(".workspace-setup"))' >/dev/null || { echo "workspace-setup: current claim $STEP_BEAD_ID is not this in-progress step; not acknowledging drain" >&2; exit 1; }
+        gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=fail --set-metadata gc.failure_class=hard --set-metadata gc.failure_reason=base_branch_diverged --status=closed || exit 1
         gc runtime drain-ack
         exit 1
     fi
@@ -138,17 +146,26 @@ elif git show-ref --verify --quiet "$BASE_LOCAL"; then
 else
     echo "STOP: base branch {{base_branch}} exists neither on origin nor locally."
     echo "Fix the rig/bead base configuration; do not substitute a different base."
-    gc bd update "$WORK_BEAD_ID" --set-metadata halt_reason=base_branch_missing
+    gc bd update "$WORK_BEAD_ID" \
+      --status=open --assignee="" \
+      --set-metadata gc.routed_to="" \
+      --set-metadata halt_reason=base_branch_missing \
+      --append-notes "Workspace halted: fix the rig/bead base configuration for {{base_branch}}, then re-sling this bead." || exit 1
     gc mail send "$WITNESS_TARGET" -s "polecat halted: base_branch_missing ($WORK_BEAD_ID)" -m "Base branch {{base_branch}} exists neither on origin nor locally in this clone. $WORK_BEAD_ID cannot start until the rig/bead base configuration is fixed."
+    STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+    STEP_BEAD=$(gc bd show "$STEP_BEAD_ID" --json) || exit 1
+    printf '%s' "$STEP_BEAD" | jq -e '(if type == "array" then .[0] else . end) | .status == "in_progress" and ((.metadata["gc.step_ref"] // "") | endswith(".workspace-setup"))' >/dev/null || { echo "workspace-setup: current claim $STEP_BEAD_ID is not this in-progress step; not acknowledging drain" >&2; exit 1; }
+    gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=fail --set-metadata gc.failure_class=hard --set-metadata gc.failure_reason=base_branch_missing --status=closed || exit 1
     gc runtime drain-ack
     exit 1
 fi
 gc bd update "$WORK_BEAD_ID" --set-metadata base_ref="$BASE_REF"
 ```
 
-The STOP arms stamp `halt_reason` and mail the witness on the way out —
-a base misconfiguration needs a human, and an unrecorded exit just loops
-through witness recovery until someone reads session logs.
+The STOP arms stamp `halt_reason`, mail the witness, hand the work bead
+back to the pool, and close the step as a hard failure before drain-ack.
+A human must fix the base before re-slinging, so the controller does not
+re-wake the session into the same halt.
 
 Every later block in this step uses `$BASE_REF` — never assume
 `origin/{{base_branch}}` exists. `$BASE_REF` is a shell variable and
