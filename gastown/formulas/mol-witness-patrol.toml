@@ -34,9 +34,12 @@ monitors the WORK layer:
 
 1. **Orphaned bead recovery** — beads assigned to agents that won't spawn
    (pool max changed, agent removed from config). This is the core job.
-2. **Refinery queue health** — work beads assigned to refinery, staleness.
-3. **Polecat health** — detect stuck polecats, file warrants for dog pool.
-4. **Help mail** — triage HELP/escalation requests from polecats.
+2. **Halted bead sweep** — a gate failure parks a work bead open, unassigned
+   and unrouted, where assignee-based orphan recovery cannot see it; sweep
+   those up and escalate each one to mayor.
+3. **Refinery queue health** — work beads assigned to refinery, staleness.
+4. **Polecat health** — detect stuck polecats, file warrants for dog pool.
+5. **Help mail** — triage HELP/escalation requests from polecats.
 
 Gate checks and convoy/swarm completion are town-wide concerns handled by
 the deacon, not the per-rig witness.
@@ -80,6 +83,10 @@ default = ""
 [vars.event_timeout]
 description = "Seconds to sleep before re-checking. Replaces former event-watch loop which hot-spun on cache-reconcile firehose."
 default = "60"
+
+[vars.halt_escalation_interval]
+description = "Seconds before a halted, unrouted work bead that nobody has acted on is escalated to the mayor again. A halt is parked, not queued: nothing else surfaces it."
+default = "3600"
 
 [[steps]]
 id = "check-inbox"
@@ -1062,9 +1069,74 @@ wisp here. The `next-iteration` step is the only place that pours the
 next wisp and burns this one."""
 
 [[steps]]
+id = "escalate-halted-beads"
+title = "Escalate halted, unrouted work beads"
+needs = ["recover-orphaned-beads"]
+description = """
+A halt parks a work bead instead of queueing it: the halting step leaves it
+`status=open` with no `assignee` and no `gc.routed_to`, so no dispatcher tier
+serves it. `recover-orphaned-beads` only considers beads that still have an
+assignee, so it skips these as well. The halting step already wrote the
+recovery steps into the bead's notes; this step only makes the bead visible
+again, it does not re-route it. Escalate with mail rather than nudge: a nudge
+is one-shot and is lost if the mayor is not watching, while mail waits in the
+mayor's inbox.
+
+**Step 1: List open, unassigned, unrouted beads that carry a halt_reason.**
+Whitespace-only halt reasons do not count, and a bead is left alone until
+`halt_escalation_interval` has passed since its last escalation:
+```bash
+HALT_WINDOW={{halt_escalation_interval}}
+case "$HALT_WINDOW" in ''|*[!0-9]*) HALT_WINDOW=3600 ;; esac
+SWEEP_FAILED=""
+HALTED_JSON=$(gc bd list ${GC_RIG:+--rig="$GC_RIG"} --all --has-metadata-key=halt_reason --limit=0 --json) || SWEEP_FAILED=listing
+if [ -z "$SWEEP_FAILED" ] && [ -z "$HALTED_JSON" ]; then SWEEP_FAILED=empty_payload; fi
+if [ -z "$SWEEP_FAILED" ]; then
+  HALTED_ROWS=$(printf '%s' "$HALTED_JSON" | jq -r --argjson window "$HALT_WINDOW" '
+    [ .[]?
+      | select(((.status // "") | tostring) == "open")
+      | select(((.assignee // "") | tostring) == "")
+      | select(((.metadata["gc.routed_to"] // "") | tostring) == "")
+      | select(((.metadata.halt_reason // "") | tostring | gsub("^\\\\s+|\\\\s+$"; "")) != "")
+      | select(((.metadata.halt_escalated_at // "") | tostring)
+               | . == "" or ((try fromdateiso8601 catch 0) < (now - $window)))
+    ] | .[] | [.id, (.metadata.halt_reason | tostring), ((.metadata.branch // "") | tostring), ((.metadata.base_ref // "") | tostring)] | @tsv') || SWEEP_FAILED=filter
+fi
+if [ -n "$SWEEP_FAILED" ]; then
+  # Fail safe, the way recover-orphaned-beads does it: a sweep that cannot see
+  # is reported, never read as "nothing is parked".
+  gc mail send mayor/ -s "WITNESS: halted-bead sweep disabled ($SWEEP_FAILED)" -m "The halted-bead sweep could not read its candidates this cycle (stage: $SWEEP_FAILED). A halt parks its bead open, unassigned and unrouted: no dispatcher tier serves it and recover-orphaned-beads filters on assignee, so nothing else surfaces it. Re-check the escalate-halted-beads recipe." || echo "WARNING: could not mail mayor about the disabled halted-bead sweep; escalate by hand."
+else
+  printf '%s\\n' "$HALTED_ROWS" | while IFS="$(printf '\\t')" read -r BEAD_ID HALT_REASON HALT_BRANCH HALT_BASE_REF; do
+    [ -n "$BEAD_ID" ] || continue
+    gc mail send mayor/ -s "HALTED BEAD: $BEAD_ID ($HALT_REASON)" -m "Halt reason: $HALT_REASON
+Branch:      $HALT_BRANCH
+Base ref:    $HALT_BASE_REF
+This bead is open, unassigned and unrouted, so no dispatcher tier serves it and recover-orphaned-beads skips it (it filters for beads that have an assignee). The halting step wrote the recovery recipe into the bead's notes: read them with 'gc bd show $BEAD_ID'.
+This patrol only surfaces the bead; it does not re-route it. Whether to recover the work and re-sling it with 'gc sling ${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat $BEAD_ID' is your decision." || { echo "WARNING: could not mail mayor about $BEAD_ID; escalate by hand."; continue; }
+    gc bd update "$BEAD_ID" --set-metadata halt_escalated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || echo "WARNING: could not stamp halt_escalated_at on $BEAD_ID; it will be escalated again next cycle."
+  done
+fi
+```
+
+For each due candidate, mail mayor the facts needed to decide what to do, then
+stamp `halt_escalated_at` so the next cycle does not repeat it. The timestamp
+is written only after the mail succeeds, so a bead whose mail failed is
+retried next cycle. `halt_escalated_at` is the only field written: status,
+assignee and `gc.routed_to` are not touched, and nothing is re-slung or
+re-routed. A listing or filter failure is not read as "no parked beads"; it is
+reported to mayor as a disabled sweep.
+
+**Exit criteria:** Every halted, unrouted bead evaluated, with an escalation
+mailed for each due candidate — or a report about a sweep that could not read
+its candidates. Continue to `check-refinery` — do NOT exit the wisp here. The
+`next-iteration` step is the only place that pours the next wisp and burns
+this one."""
+
+[[steps]]
 id = "check-refinery"
 title = "Check refinery queue health"
-needs = ["recover-orphaned-beads"]
+needs = ["escalate-halted-beads"]
 description = """
 Ensure the refinery is processing work and the queue is healthy.
 
