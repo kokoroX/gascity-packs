@@ -69,7 +69,7 @@ run_tick() {
 
 set_payloads() {
     local sessions="$1" in_progress="$2" open="$3"
-    printf '%s' "$sessions" >"$SESSIONS"
+    printf '{"ok":true,"schema_version":1,"filters":{},"summary":{},"sessions":%s}' "$sessions" >"$SESSIONS"
     printf '%s' "$in_progress" >"$HELD_IN_PROGRESS"
     printf '%s' "$open" >"$HELD_OPEN"
 }
@@ -148,6 +148,17 @@ test_empty_hand_pours_assigns_and_nudges() {
         fail "a fresh pour must produce exactly one nudge: $(cat "$CALLS")"
     ! grep -q '^bd mol burn' "$CALLS" ||
         fail "a successful pour must not burn anything: $(cat "$CALLS")"
+}
+
+test_real_session_object_empty_hand_pours_and_nudges() {
+    set_payloads "$BOOT_SESSION" '[]' '[]'
+    run_tick
+
+    [ "$RC" -eq 0 ] || fail "the real session object with an empty hand must exit 0, got $RC ($ERR)"
+    [ "$(grep -c '^bd mol wisp' "$CALLS")" -eq 1 ] ||
+        fail "the real session object must pour exactly one wisp: $(cat "$CALLS")"
+    [ "$(grep -c '^session nudge' "$CALLS")" -eq 1 ] ||
+        fail "the real session object must produce exactly one nudge: $(cat "$CALLS")"
 }
 
 test_assign_failure_burns_the_poured_wisp_and_exits_nonzero() {
