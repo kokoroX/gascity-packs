@@ -629,6 +629,31 @@ test_boot_deacon_observation_query_sees_wisps_tier() {
     done
 }
 
+test_boot_never_pours_its_own_wisp() {
+    local order="$GASTOWN/orders/boot-patrol-tick.toml"
+    local formula="$GASTOWN/formulas/mol-boot-patrol.toml"
+
+    parse_toml "$order" "$formula" "$GASTOWN/agents/boot/agent.toml"
+
+    # The cooldown order owns boot's cadence. If boot pours its own successor,
+    # its assigned work changes every cycle; the controller then fresh-cycles a
+    # wake_mode="fresh" always-session every ~80-110s and idle_timeout never
+    # fires. The order is the only pour site.
+    ! grep -R -F 'gc bd mol wisp mol-boot-patrol' "$GASTOWN/agents/boot" >/dev/null ||
+        fail "agents/boot must never pour its own patrol wisp; gastown/orders/boot-patrol-tick.toml owns the pour"
+    ! grep -F 'gc bd mol wisp mol-boot-patrol' "$formula" >/dev/null ||
+        fail "mol-boot-patrol must never pour its own successor wisp; gastown/orders/boot-patrol-tick.toml owns the pour"
+
+    [[ -f "$order" ]] ||
+        fail "missing gastown/orders/boot-patrol-tick.toml"
+    grep -F 'trigger = "cooldown"' "$order" >/dev/null ||
+        fail "boot-patrol-tick must be a cooldown order; its interval is boot's cadence"
+    grep -F 'interval = "1h"' "$order" >/dev/null ||
+        fail "boot-patrol-tick must own boot's 1h cadence"
+    grep -F 'exec = "bash $GC_PACK_DIR/assets/scripts/boot-patrol-tick.sh"' "$order" >/dev/null ||
+        fail "boot-patrol-tick must run the pack-local boot-patrol-tick.sh script"
+}
+
 test_refinery_direct_merge_is_worktree_safe_and_fail_closed() {
     local formula direct_block
     formula="$GASTOWN/formulas/mol-refinery-patrol.toml"
@@ -883,6 +908,7 @@ test_witness_handoff_recovery_is_guarded_and_fail_closed
 test_boot_wisp_queries_pin_include_infra
 test_boot_patrol_burn_resolves_current_wisp
 test_boot_deacon_observation_query_sees_wisps_tier
+test_boot_never_pours_its_own_wisp
 test_refinery_direct_merge_is_worktree_safe_and_fail_closed
 test_refinery_rebase_guidance_matches_the_guarded_step
 test_refinery_pre_existing_failures_use_city_store

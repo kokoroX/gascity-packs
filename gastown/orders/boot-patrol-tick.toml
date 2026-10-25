@@ -1,0 +1,8 @@
+[order]
+description = "Pour boot's next patrol wisp and nudge it. The interval is boot's cadence."
+# City-scoped: boot is a single city-level named session.
+scope = "city"
+trigger = "cooldown"
+interval = "1h"
+exec = "bash $GC_PACK_DIR/assets/scripts/boot-patrol-tick.sh"
+timeout = "1m"
