@@ -67,9 +67,10 @@ run_tick() {
     ERR=$(cat "$ERRFILE")
 }
 
+# Session payloads use the envelope gc session list --json really prints.
 set_payloads() {
     local sessions="$1" in_progress="$2" open="$3"
-    printf '%s' "$sessions" >"$SESSIONS"
+    printf '{"ok":true,"schema_version":1,"filters":{},"summary":{},"sessions":%s}' "$sessions" >"$SESSIONS"
     printf '%s' "$in_progress" >"$HELD_IN_PROGRESS"
     printf '%s' "$open" >"$HELD_OPEN"
 }

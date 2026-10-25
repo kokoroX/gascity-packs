@@ -8,7 +8,7 @@
 set -euo pipefail
 
 # The boot session's agent name is its wisp assignee ("<binding>.boot").
-boot_json=$(gc session list --json | jq -c '[.[] | select((.template // "") | test("(^|\\.)boot$")) | select(.closed | not)] | first // empty')
+boot_json=$(gc session list --json | jq -c '[(.sessions // [])[] | select((.template // "") | test("(^|\\.)boot$")) | select(.closed | not)] | first // empty')
 if [[ -z "$boot_json" ]]; then
   echo "no boot session"
   exit 0
