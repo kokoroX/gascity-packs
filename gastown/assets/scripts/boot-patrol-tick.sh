@@ -41,5 +41,5 @@ else
   echo "$boot already holds: $held"
 fi
 
-gc session nudge "$sid" --message "Patrol tick: run 'gc prime' and work your assigned mol-boot-patrol wisp." >/dev/null
+gc session nudge "$sid" "Patrol tick: run 'gc prime' and work your assigned mol-boot-patrol wisp." >/dev/null
 echo "nudged $boot"
