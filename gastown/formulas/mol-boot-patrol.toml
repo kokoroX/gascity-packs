@@ -1,24 +1,19 @@
 description = """
-Boot patrol loop. Poured as a root-only wisp on startup:
+Boot patrol loop. The `boot-patrol-tick` order pours one root-only
+`mol-boot-patrol` wisp per interval and assigns it to boot; boot never pours
+its own wisp.
 
-  WISP=$(gc bd mol wisp mol-boot-patrol --root-only --var binding_prefix='{{binding_prefix}}' --json | jq -r '.new_epic_id // empty')
-  gc bd update $WISP --assignee=$GC_AGENT
-
-`--json` prints one multi-line object on stdout and gc writes config
-advisories to stderr: pipe the whole stdout into jq, never through
-`2>&1`, `tail`, or `head`.
-
-Each wisp is ONE iteration: observe the deacon, decide, act, pour the next
-iteration. On crash, re-read the formula steps and determine where you left
-off from context (wisp state, last action).
+Each wisp is ONE iteration: observe the deacon, decide, act, burn the wisp.
+On crash, re-read the formula steps and determine where you left off from
+context (wisp state, last action).
 
 Formula steps are NOT materialized as child beads. Read the step
 descriptions below and work through them in order.
 
 The loop mechanism: EVERY step is one leg of the same wisp. Never exit the
 wisp from an intermediate step — either continue to the next step or jump
-directly to `next-iteration` to pour and burn. Exiting without burning leaks
-wisps. The prompt only bootstraps the first wisp.
+directly to `finish` to burn this one and request a restart. Exiting without
+burning leaks wisps; the order only pours when boot holds no patrol wisp.
 
 ## Boot Role
 
@@ -29,7 +24,7 @@ wisps, pane output, and mail.
 Narrow scope keeps each cycle cheap. Boot does not monitor witnesses,
 refineries, or polecats — the deacon and witnesses do that.
 
-## Why this is a patrol loop and not a single pass
+## Why the cadence is an order, not a self-poured loop
 
 Boot backs a `mode = "always"` named session, which is *unconditionally
 desired*: the moment its provider session goes away, the controller
@@ -39,12 +34,17 @@ cadence between wakes. Boot was shaped that way and hot-looped — ~500 fresh
 sessions/hr, ~2.4M output tokens in 5h, plus a per-second `bead.updated`
 flood on its own session bead — until it was drained (gci-fed).
 
-Every other always-mode agent (mayor, deacon, witness) avoids the trap the
-same way, and boot now matches them: run a patrol wisp, end the turn WITHOUT
-`drain-ack`, and let the agent's `idle_timeout` pace the recycle. Idle sleep
-does not apply here — always-mode named sessions are exempt from it — so
-`idle_timeout` is the *only* thing standing between this agent and a hot
-loop.
+The cadence now comes from `orders/boot-patrol-tick.toml`. At each tick the
+order pours one wisp when boot holds none, assigns it to boot, and nudges
+boot. Boot runs the wisp, burns it in `finish`, and calls
+`gc runtime request-restart`; the restarted session finds no assigned work and
+ends its turn idle until the next tick. **Boot never pours its own wisp.**
+Self-pouring is what broke the previous shape: pouring and assigning a
+successor before burning the current wisp changed boot's assigned work every
+cycle, so the controller fresh-cycled the `wake_mode = "fresh"` session every
+cycle and `idle_timeout` never fired. The trace showed three
+`fresh_cycle`/`restart` transitions back-to-back, 79-111s apart. The
+order-paced shape keeps one restart per tick, not one per wisp.
 
 **Do not re-introduce `gc runtime drain-ack` or `exit` into this loop.**
 
@@ -67,7 +67,7 @@ gc session peek {{binding_prefix}}deacon --lines 1
 ```
 
 If the deacon session does not exist, there is nothing to judge — the
-controller restarts dead agents. Skip straight to `next-iteration`.
+controller restarts dead agents. Skip straight to `finish`.
 
 **2. Observe deacon state:**
 
@@ -76,7 +76,8 @@ controller restarts dead agents. Skip straight to `next-iteration`.
 gc session peek {{binding_prefix}}deacon --lines 30
 
 # Deacon's current patrol wisp — how fresh is it?
-# --type=molecule --include-infra for the same reason as the reconcile below:
+# --type=molecule --include-infra for the same reason as the current-wisp
+# query in `finish` below:
 # an untyped query sets SkipWisps exactly as a bare typed one does, so without
 # the flag this returns a wisp-free set and the wisp-keyed rows in the
 # decision table below can never fire. Note the deacon's *queued successor*
@@ -143,36 +144,19 @@ The dog pool picks up the warrant and runs `mol-shutdown-dance`.
 controller handles liveness), or monitor any other agent.
 
 **Exit criteria:** Deacon assessed; nudge or warrant issued if warranted.
-Continue to `next-iteration` — do NOT exit the wisp here. `next-iteration` is
-the only place that pours the next wisp and burns this one."""
+Continue to `finish` — do NOT exit the wisp here. `finish` is the only place
+that burns this wisp."""
 
 [[steps]]
-id = "next-iteration"
-title = "Pour next iteration and loop"
+id = "finish"
+title = "Burn this wisp and request a restart"
 needs = ["check-deacon"]
 description = """
-End of watchdog cycle. Pour the next iteration, burn this one, end the turn.
+End of watchdog cycle. Burn this wisp, then request a restart. Do NOT pour a
+next wisp: the `boot-patrol-tick` order owns the cadence and pours and
+assigns the next one at its tick.
 
-**1. Context check:**
-
-If context feels heavy or RSS is high:
-```bash
-gc runtime request-restart
-```
-This blocks forever. The controller restarts you. The next wisp is already
-assigned — the new session resumes from it.
-
-**2. Resolve this wisp and pour next iteration BEFORE burning (reconcile to
-exactly one):**
-
-Reuse an already-queued wisp instead of pouring a duplicate. A prior cycle may
-have poured a next wisp without burning, or a restart may have raced — keep
-one open patrol wisp and burn any surplus, so wisps never accumulate. Wisp
-roots are `issue_type=molecule` (never `--type=wisp`, which is not a valid
-gc bd type and matches nothing). They are also ephemeral, so they live in the
-wisps tier that `gc bd list` hides without `--include-infra` — drop that flag
-and this query returns `[]` even when a wisp is already queued, so the surplus
-burn never runs and every cycle pours a duplicate.
+**1. Resolve this wisp:**
 
 ```bash
 # Resolve the wisp you are working before touching anything else. gc does not
@@ -181,66 +165,39 @@ burn never runs and every cycle pours a duplicate.
 # GC_BEAD_ID is exported only into ralph check scripts. Boot has no hook-claim
 # block to export it either, so the query below is the load-bearing leg, not a
 # fallback — burning a bare "$GC_BEAD_ID" would burn "" on every cycle and
-# leave this wisp behind. --include-infra for the same wisps-tier reason above.
+# leave this wisp behind. --include-infra for the same wisps-tier reason the
+# observation query carries it.
 CURRENT_WISP=${GC_BEAD_ID:-}
 if [ -z "$CURRENT_WISP" ]; then
   CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --include-infra --limit=1 --json | jq -r '.[0].id // empty')
 fi
-
-OPEN_WISPS=$(gc bd list --assignee="$GC_AGENT" --status=open --type=molecule --include-infra --limit=0 --json | jq -r '.[].id')
-NEXT=$(printf '%s\\n' $OPEN_WISPS | sed -n '1p')
-for extra in $(printf '%s\\n' $OPEN_WISPS | sed '1d'); do
-  gc bd mol burn "$extra" --force
-done
-if [ -z "$NEXT" ]; then
-  NEXT=$(gc bd mol wisp mol-boot-patrol --root-only --var binding_prefix='{{binding_prefix}}' --json | jq -r '.new_epic_id // empty')
-  if [ -z "$NEXT" ]; then
-    echo "Could not pour next boot wisp; not burning."
-  elif ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
-    # Pour-then-assign is not atomic. The wisp exists but is unassigned, and
-    # every reconcile query here filters on --assignee, so no later cycle could
-    # ever see it — reclaim it by id now, best effort, before dropping it.
-    echo "Could not assign next boot wisp; reclaiming it and not burning."
-    gc bd mol burn "$NEXT" --force || true
-    NEXT=""
-  fi
-fi
 ```
 
-If either guard fired, leave `$NEXT` empty, skip the burn in step 3, and go
-straight to step 4. Do not drain-ack and do not `exit` — ending the turn with
-the current wisp still open is the recoverable state; the next cycle retries.
+**2. Burn it:**
 
-**3. Burn this wisp — the one you are working, `$CURRENT_WISP` from step 2:**
+Burn the resolved `$CURRENT_WISP`, never a bare `$GC_BEAD_ID`: unset, the
+latter expands to an empty burn target, which reclaims nothing and silently
+leaves this wisp behind every cycle.
 
-Only once a successor is queued. `$NEXT` is empty exactly when the pour or the
-assign above failed, and burning then ends the cycle with no open successor,
-leaving the watchdog blind until the next `idle_timeout` recycle. Burn the
-resolved `$CURRENT_WISP`, never a bare `$GC_BEAD_ID`: unset, that expands to
-`gc bd mol burn "" --force`, which reclaims nothing and silently leaves this
-wisp behind every cycle.
 ```bash
-if [ -n "$CURRENT_WISP" ] && [ -n "$NEXT" ]; then
+if [ -n "$CURRENT_WISP" ]; then
   gc bd mol burn "$CURRENT_WISP" --force
-elif [ -z "$CURRENT_WISP" ]; then
+else
   echo "Could not resolve current boot wisp; not burning."
 fi
 ```
 
-**4. Exit this turn:**
+**3. Request a restart:**
 
-Write exactly:
+```bash
+gc runtime request-restart
 ```
-IDLE: no work, exiting turn.
-```
 
-Then stop immediately. Do NOT sleep, call ScheduleWakeup, or use Monitor —
-and in particular do NOT call `gc runtime drain-ack` or `exit`. Boot backs a
-`mode = "always"` named session: draining tears down the provider session,
-the controller re-materializes it on the very next tick, and the result is
-the ~500-sessions/hr hot loop this formula exists to prevent (gci-fed).
-Ending the turn leaves the session alive and idle; `idle_timeout` recycles it
-on a sane cadence and the next wisp — already assigned — resumes the loop.
+This blocks until the controller restarts you. The new session wakes with no
+assigned wisp, ends its turn idle, and waits for the next order tick.
 
-**Exit criteria:** Next wisp poured and assigned, this wisp burned, turn
-ended with the IDLE signal and no drain-ack."""
+Do NOT pour a next wisp, do NOT call `gc runtime drain-ack`, and do NOT
+`exit`: the order owns the cadence, and a self-poured successor restarts the
+fresh-cycle loop this design exists to stop.
+
+**Exit criteria:** This wisp burned, restart requested, no successor poured."""
