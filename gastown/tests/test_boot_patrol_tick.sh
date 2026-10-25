@@ -40,6 +40,20 @@ case "$*" in
     bd\ mol\ burn\ *)
         ;;
     session\ nudge\ *)
+        shift
+        shift
+        for arg do
+            case "$arg" in
+                -*)
+                    printf 'gc: unknown flag: %s\n' "$arg" >&2
+                    exit 1
+                    ;;
+            esac
+        done
+        [ "$#" -ge 2 ] || {
+            printf 'gc: session nudge requires an id and message\n' >&2
+            exit 1
+        }
         ;;
     *)
         printf 'unexpected gc invocation: %s\n' "$*" >&2
@@ -65,6 +79,13 @@ run_tick() {
     RC=$?
     set -e
     ERR=$(cat "$ERRFILE")
+}
+
+assert_nudge_shape() {
+    grep -Eq '^session nudge ci-wisp-4co .+' "$CALLS" ||
+        fail "the nudge must target the boot session id and include a message: $(cat "$CALLS")"
+    ! grep -q '^session nudge .*--message' "$CALLS" ||
+        fail "the nudge must pass its message positionally: $(cat "$CALLS")"
 }
 
 # Session payloads use the envelope gc session list --json really prints.
@@ -121,8 +142,7 @@ test_existing_wisp_is_only_nudged() {
         fail "an existing wisp needs no assignment: $(cat "$CALLS")"
     [ "$(grep -c '^session nudge' "$CALLS")" -eq 1 ] ||
         fail "an existing wisp must produce exactly one nudge: $(cat "$CALLS")"
-    grep -F 'session nudge ci-wisp-4co' "$CALLS" >/dev/null ||
-        fail "the nudge must target the boot session id: $(cat "$CALLS")"
+    assert_nudge_shape
 
     # An open wisp counts as held too — the order must not pour a second one.
     set_payloads "$BOOT_SESSION" '[]' '[{"id":"wi-queued"}]'
@@ -132,6 +152,7 @@ test_existing_wisp_is_only_nudged() {
         fail "a queued wisp must not be duplicated: $(cat "$CALLS")"
     [ "$(grep -c '^session nudge' "$CALLS")" -eq 1 ] ||
         fail "a queued wisp must still produce exactly one nudge: $(cat "$CALLS")"
+    assert_nudge_shape
 }
 
 test_empty_hand_pours_assigns_and_nudges() {
@@ -147,6 +168,7 @@ test_empty_hand_pours_assigns_and_nudges() {
         fail "the poured wisp must be assigned to the boot agent name: $(cat "$CALLS")"
     [ "$(grep -c '^session nudge' "$CALLS")" -eq 1 ] ||
         fail "a fresh pour must produce exactly one nudge: $(cat "$CALLS")"
+    assert_nudge_shape
     ! grep -q '^bd mol burn' "$CALLS" ||
         fail "a successful pour must not burn anything: $(cat "$CALLS")"
 }
