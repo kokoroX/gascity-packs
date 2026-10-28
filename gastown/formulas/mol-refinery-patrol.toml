@@ -629,6 +629,10 @@ TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_bran
      if [ -z "$CURRENT_WISP" ]; then
        CURRENT_WISP=$(gc bd list --assignee="${GC_AGENT:?}" --status=open,in_progress --type=molecule --include-infra --limit=0 --json | jq -r '[.[] | select(.title == "mol-refinery-patrol" and .ephemeral == true)] | sort_by(.created_at, .id) | last | .id // empty')
      fi
+     if [ -z "$CURRENT_WISP" ]; then
+       echo "Could not resolve the current refinery wisp; not pouring a successor."
+       gc runtime drain-ack
+       exit 1
      fi
      NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')
      if [ -z "$NEXT" ]; then
@@ -719,7 +723,6 @@ Target: $TARGET"
   CURRENT_WISP=${GC_BEAD_ID:-}
   if [ -z "$CURRENT_WISP" ]; then
     CURRENT_WISP=$(gc bd list --assignee="${GC_AGENT:?}" --status=open,in_progress --type=molecule --include-infra --limit=0 --json | jq -r '[.[] | select(.title == "mol-refinery-patrol" and .ephemeral == true)] | sort_by(.created_at, .id) | last | .id // empty')
-  fi
   fi
   if [ -z "$CURRENT_WISP" ]; then
     echo "Could not resolve the current refinery wisp; not pouring a successor."
