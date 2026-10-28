@@ -187,10 +187,7 @@ for ORPHAN in $ORPHANS; do
   # surfaces beads the inbox missed.
 done
 
-# Step 1: Check for in-progress work you already hold
-{{ .AssignedInProgressQuery }}
-
-# Step 2: Reconcile your patrol wisps to exactly one.
+# Step 1: Reconcile your patrol wisps to exactly one.
 # A patrol wisp is an ephemeral mol-refinery-patrol molecule that stays open
 # for its whole life, so look for open AND in_progress roots, and pass
 # --include-infra: gc bd list hides the wisps tier without it. Keep the newest
@@ -214,7 +211,7 @@ for EXTRA in $(printf '%s\n' $PATROL_WISPS | sed '1d'); do  # burn the leaked su
   gc bd mol burn "$EXTRA" --force
 done
 
-# Step 3: No patrol wisp at all? Pour exactly one (root-only — no child step beads) and assign it
+# Step 2: No patrol wisp at all? Pour exactly one (root-only — no child step beads) and assign it
 if [ -z "$WISP" ]; then
   WISP=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')
   if [ -z "$WISP" ]; then
