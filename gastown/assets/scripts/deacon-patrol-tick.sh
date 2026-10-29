@@ -2,8 +2,8 @@
 #
 # deacon-patrol-tick.sh — start one deacon patrol cycle.
 #
-# Plumbing only: keep exactly one patrol wisp assigned to the deacon and nudge
-# it. Judging the town stays with the deacon.
+# Plumbing only: assign one patrol wisp to the deacon, or nudge it if it
+# already holds one. Judging the town stays with the deacon.
 
 set -euo pipefail
 
@@ -36,7 +36,10 @@ if [[ -z "$held" ]]; then
     echo "could not assign deacon patrol wisp $wisp" >&2
     exit 1
   fi
+  # Assignment triggers a fresh-cycle with a startup nudge; nudging the old
+  # session would waste requests before the controller replaces it.
   echo "poured $wisp for $deacon"
+  exit 0
 else
   echo "$deacon already holds: $held"
 fi

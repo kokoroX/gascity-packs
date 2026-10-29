@@ -12,7 +12,7 @@ below and work through them in order.
 
 The loop mechanism: EVERY step is one leg of the same wisp. Never exit the wisp
 from an intermediate step — either continue to the next step or jump directly
-to `next-iteration` to burn this one and request a restart. Exiting without
+to `next-iteration` to burn this one and end the turn. Exiting without
 burning leaks wisps; the order only pours when the deacon holds no patrol wisp.
 
 ## Deacon Role
@@ -47,11 +47,13 @@ restarted it on the very next patrol pass (~30s) after a ~4.5-minute cycle —
 about 10 cycles an hour, ~330M tokens a day, on an idle town too.
 
 The cadence now comes from `orders/deacon-patrol-tick.toml`. At each tick the
-order pours one wisp when the deacon holds none, assigns it to the deacon, and
-nudges it. The deacon runs the wisp, burns it in `next-iteration`, and calls
-`gc runtime request-restart`; the restarted session finds no assigned work and
-ends its turn idle until the next tick. **The deacon never pours its own
-wisp.** `idle_timeout` is not set: the order's interval is the cadence.
+order pours one wisp when the deacon holds none and assigns it without nudging.
+The controller fresh-cycles the session, whose startup nudge begins the patrol.
+The deacon burns the wisp in `next-iteration` and ends its turn; the session
+idles with its old context and makes no requests until the next tick assigns a
+new wisp and triggers another fresh session. An already-held wisp is nudged.
+**The deacon never pours its own wisp.** `idle_timeout` is not set: the order's
+interval is the cadence.
 
 **Do not re-introduce `gc runtime drain-ack` or `exit` into this loop.**
 
@@ -585,10 +587,10 @@ Close this step after check."""
 
 [[steps]]
 id = "next-iteration"
-title = "Burn this wisp and request a restart"
+title = "Burn this wisp and end the turn"
 needs = ["system-health"]
 description = """
-End of patrol cycle. Burn this wisp, then request a restart. Do NOT pour a next
+End of patrol cycle. Burn this wisp, then end the turn. Do NOT pour a next
 wisp: the `deacon-patrol-tick` order owns the cadence and pours and assigns the
 next one at its tick.
 
@@ -612,7 +614,7 @@ unread for the next cycle's `check-inbox` step — `gc mail peek <id>` shows one
 in full without marking it read. Archiving them here, unhandled, would bury
 them.
 
-**3. Resolve this wisp, burn it, then request a restart (one script):**
+**3. Resolve and burn this wisp (one script):**
 
 Run this as ONE script. `$GC_BEAD_ID` is not set in a patrol session, and a
 patrol wisp stays `open` for its whole life (assigning it does not claim it), so
@@ -638,22 +640,27 @@ if [ -z "$CURRENT_WISP" ]; then
   CURRENT_WISP=$(gc bd list --assignee="${GC_AGENT:?}" --status=open,in_progress --type=molecule --include-infra --limit=0 --json | jq -r '[.[] | select(.title == "mol-deacon-patrol" and .ephemeral == true)] | sort_by(.created_at, .id) | last | .id // empty')
 fi
 if [ -n "$CURRENT_WISP" ]; then
-  gc bd mol burn "$CURRENT_WISP" --force
+  if gc bd mol burn "$CURRENT_WISP" --force; then
+    echo "Patrol cycle done: burned $CURRENT_WISP; ending turn until the next tick."
+  else
+    gc runtime request-restart
+  fi
 else
   echo "Could not resolve current deacon wisp; not burning."
+  gc runtime request-restart
 fi
-gc runtime request-restart
 ```
 
-**4. Let the restart happen:**
+**4. End the turn:**
 
-The script above ends with `gc runtime request-restart`, which blocks until the
-controller restarts you. The new session wakes with no assigned wisp (or adopts
-one that a failed burn left behind), and the `deacon-patrol-tick` order brings
-the next cycle on its interval.
+After a successful burn, end the turn. This session idles with its old context
+and makes no requests; the next tick assigns a new wisp and the controller
+fresh-cycles it into a new session. If the burn fails or the wisp cannot be
+resolved, the restart request blocks until the controller restarts the session,
+which can adopt the still-assigned wisp.
 
 Do NOT pour a next wisp, do NOT call `gc runtime drain-ack`, and do NOT `exit`:
 the order owns the cadence, and a self-poured successor restarts the fresh-cycle
 loop this design exists to stop.
 
-**Exit criteria:** This wisp burned, restart requested, no successor poured."""
+**Exit criteria:** This wisp burned and turn ended, or restart requested on failure; no successor poured."""

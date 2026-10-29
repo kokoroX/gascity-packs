@@ -4,16 +4,15 @@ set -euo pipefail
 # Coverage for the deacon's between-cycles contract.
 #
 # The deacon is an always-on session, and the `deacon-patrol-tick` order paces
-# it: the order pours and assigns one patrol wisp per 15-minute tick and nudges
-# the deacon. The deacon runs the wisp, burns it in `next-iteration`, and calls
-# `gc runtime request-restart`. The restarted session finds no assigned wisp,
-# prints the IDLE signal, and ends its turn until the next tick. The deacon
+# it: the order pours and assigns one patrol wisp per 15-minute tick, triggering
+# a fresh session. The deacon burns it in `next-iteration` and ends its turn;
+# the next assignment triggers another fresh session. The deacon
 # must never pour its own successor: self-pouring changes its assigned work
 # every cycle, so the controller fresh-cycles the wake_mode="fresh" session in
 # a hot loop instead of waiting for the order.
 #
 # The crash-recovery fallback must do the same: resolve the wisp it was
-# working, burn it, and request a restart. It never drains
+# working, burn it, and end the turn; only failure requests a restart. It never drains
 # (`gc runtime drain-ack`) and never pours a successor; a failed burn leaves
 # the wisp assigned for the restarted session's startup to adopt.
 #
@@ -111,10 +110,10 @@ leg_prompt_ends_the_turn() {
     if grep -n -F 'No Idle State' "$PROMPT"; then
         fail "deacon prompt still forbids the idle state that is the deacon's correct resting state between cycles"
     fi
-    grep -F -q -- '-> burn the wisp -> request a restart.' "$PROMPT" ||
-        fail "deacon prompt's loop summary must burn the wisp and request a restart"
-    grep -F -q 'The fallback ends by requesting a restart' "$PROMPT" ||
-        fail "deacon prompt's crash-recovery fallback must say it ends by requesting a restart"
+    grep -F -q -- '-> burn the wisp -> end the turn.' "$PROMPT" ||
+        fail "deacon prompt's loop summary must burn the wisp and end the turn"
+    grep -F -q 'After a successful fallback burn, end the turn' "$PROMPT" ||
+        fail "deacon prompt's fallback must end the turn after a successful burn"
     ! grep -F -q 'Pour next wisp' "$PROMPT" ||
         fail "deacon prompt must not offer a pour-next-wisp command; the deacon-patrol-tick order owns the cadence"
     ! grep -F -q 'gc bd mol wisp mol-deacon-patrol' "$PROMPT" ||
@@ -132,7 +131,7 @@ print(next(s for s in steps if s["id"] == "next-iteration")["description"])
 PY
 )
     printf '%s\n' "$step" | grep -F -q 'gc runtime request-restart' ||
-        fail "next-iteration must end by requesting a restart"
+        fail "next-iteration must request a restart on failure"
     printf '%s\n' "$step" | grep -F -q 'no successor poured' ||
         fail "next-iteration must state that it pours no successor"
     printf '%s\n' "$step" | grep -F -q 'Could not resolve current deacon wisp; not burning.' ||
@@ -179,11 +178,12 @@ printf '%s\n' "$invocation" >>"$GC_LOG"
 case "$invocation" in
     "gc bd list "*--status=in_progress*) printf '[]\n' ;;
     "gc bd list "*)
-        if [ "$FALLBACK_STATE" = current ]; then
+        if [ "$FALLBACK_STATE" = current ] || [ "$FALLBACK_STATE" = burn_fail ]; then
             printf '[{"id":"wisp-1","title":"mol-deacon-patrol","status":"open","issue_type":"molecule","ephemeral":true,"assignee":"deacon","created_at":"2026-10-22T00:00:00Z"}]\n'
         else
             printf '[]\n'
         fi ;;
+    "gc bd mol burn "*) [ "$FALLBACK_STATE" != burn_fail ] || exit 1 ;;
     "gc bd mol wisp "*) printf '{"new_epic_id":"wisp-2"}\n' ;;
     *) : ;;
 esac
@@ -208,22 +208,26 @@ leg_fallback_executes_without_reentering() {
         fail "the fallback did not end by requesting a restart; the leg measured nothing"
 }
 
-# Whatever the fallback managed to do, it must end by requesting a restart, or
-# a deacon whose current wisp is still open never gets another cycle.
-leg_fallback_ends_with_restart() {
+leg_fallback_ends_turn_or_restarts() {
     local state
-    for state in empty current; do
+    for state in empty current burn_fail; do
         run_fallback "$state"
-        [ "$(tail -n 1 "$GC_LOG")" = "gc runtime request-restart" ] ||
-            fail "with the deacon's patrol wisp state '$state', the fallback must end with gc runtime request-restart (last gc call: $(tail -n 1 "$GC_LOG"))"
+        if [ "$state" = current ]; then
+            grep -q '^gc bd mol burn wisp-1 --force$' "$GC_LOG" ||
+                fail "with the current wisp assigned, the fallback must burn it"
+            ! grep -q '^gc runtime request-restart$' "$GC_LOG" ||
+                fail "a successful burn must end the turn without restarting"
+            grep -Fq 'Patrol cycle done: burned wisp-1; ending turn until the next tick.' "$tmp/fallback.out" ||
+                fail "a successful burn must report the end of the turn"
+        else
+            [ "$(tail -n 1 "$GC_LOG")" = "gc runtime request-restart" ] ||
+                fail "with state '$state', the fallback must end with a restart request"
+        fi
         ! grep -q '^gc runtime drain-ack$' "$GC_LOG" ||
-            fail "with state '$state', the fallback must not drain; the order owns the cadence"
+            fail "with state '$state', the fallback must not drain"
         ! grep -q '^gc bd mol wisp' "$GC_LOG" ||
             fail "with state '$state', the fallback must not pour a successor"
     done
-    run_fallback current
-    grep -q '^gc bd mol burn wisp-1 --force$' "$GC_LOG" ||
-        fail "with the deacon's current wisp assigned, the fallback must burn it"
 }
 
 LEG_NAMES=()
@@ -245,7 +249,7 @@ run_leg "no deacon script runs gc hook" leg_no_fence_reenters_the_loop
 run_leg "prompt ends the turn between cycles" leg_prompt_ends_the_turn
 run_leg "next-iteration burns and requests a restart" leg_formula_burns_and_restarts
 run_leg "fallback executes without re-entering the loop" leg_fallback_executes_without_reentering
-run_leg "fallback ends with a restart, never a pour" leg_fallback_ends_with_restart
+run_leg "fallback ends turn or restarts on failure, never a pour" leg_fallback_ends_turn_or_restarts
 
 echo "--- leg summary (tree: $TREE) ---"
 failed=0

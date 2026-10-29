@@ -3,8 +3,7 @@ wake_mode = "fresh"
 work_dir = ".gc/agents/deacon"
 nudge = "Run 'gc prime' to check patrol status and begin heartbeat cycle."
 # The deacon's cadence is the interval of orders/deacon-patrol-tick.toml: the
-# order pours and assigns one patrol wisp per tick, and the deacon ends each
-# cycle with gc runtime request-restart. Do not set idle_timeout — the order
-# already paces the wake, and a timeout would recycle the idle session for
-# nothing.
+# order pours and assigns a patrol wisp, triggering a fresh session; the deacon
+# burns it and ends its turn. Do not set idle_timeout — the order already paces
+# the wake, and a timeout would recycle the idle session for nothing.
 max_active_sessions = 1

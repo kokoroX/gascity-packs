@@ -1,5 +1,5 @@
 [order]
-description = "Pour boot's next patrol wisp and nudge it. The interval is boot's cadence."
+description = "Assign boot's next patrol wisp, or nudge it if it already holds one. The interval is boot's cadence."
 # City-scoped: boot is a single city-level named session.
 scope = "city"
 trigger = "cooldown"

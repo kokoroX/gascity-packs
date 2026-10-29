@@ -3,7 +3,7 @@ wake_mode = "fresh"
 work_dir = ".gc/agents/boot"
 nudge = "Run 'gc prime' to check deacon health and begin the watchdog cycle."
 # Boot's cadence is the interval of orders/boot-patrol-tick.toml: the order
-# pours and assigns one patrol wisp per tick, and boot ends each cycle with
-# gc runtime request-restart. Do not set idle_timeout — the order already paces
-# the wake, and a timeout would recycle the idle session for nothing.
+# pours and assigns a patrol wisp, triggering a fresh session; boot burns it
+# and ends its turn. Do not set idle_timeout — the order already paces the wake,
+# and a timeout would recycle the idle session for nothing.
 max_active_sessions = 1
