@@ -19,13 +19,15 @@ set -euo pipefail
 # Startup had the same leak by another route: it poured a fresh wisp on every
 # start without looking for the one already assigned.
 #
-# Two more properties are pinned here. Every deacon failure exit drains the
-# session (`gc runtime drain-ack`) rather than only ending the turn: Gas City
-# moves an always-on deacon onto its next cycle only when the wisp it was
-# running is gone, so a turn that ends with that wisp still open, or with no
-# successor, is the deacon's last turn. And an empty GC_AGENT must never reach
-# a lookup: an empty --assignee is no filter, so it would hand back every
-# patrol wisp in the store, other agents' and other cities' included.
+# The deacon's cadence is now owned by the `deacon-patrol-tick` order, so its
+# loop has one more property pinned here: a rotation burns the current wisp and
+# ends with `gc runtime request-restart`, never pouring a successor and never
+# draining. A self-poured successor changes the fresh session's assigned work
+# every cycle, which is the hot loop this design exists to stop. Startup adopts
+# the wisp the order assigned and prints IDLE when there is none; an empty hand
+# is the gap between ticks, not a license to self-pour. And an empty GC_AGENT
+# must never reach a lookup: an empty --assignee is no filter, so it would hand
+# back every patrol wisp in the store, other agents' and other cities' included.
 #
 # Every block here is LIFTED out of the shipped formula or prompt and executed
 # against a stateful stub `gc`, not transcribed. The stub keeps a tiny wisp
@@ -196,9 +198,11 @@ count_calls() { grep -c -F -- "$1" "$GC_LOG" || true; }
 # as gc decodes them before an agent ever sees the text.
 #
 # A rotate region starts at the wisp resolution and ends at the burn of the
-# resolved wisp; both ends must sit in ONE fenced block, because that is the
-# script an agent runs. A burn in a different block from its resolution reads a
-# variable that no longer exists, so a split fails extraction here.
+# resolved wisp (plus the `gc runtime request-restart` that follows it when the
+# block ends an order-paced cycle); both ends must sit in ONE fenced block,
+# because that is the script an agent runs. A burn in a different block from its
+# resolution reads a variable that no longer exists, so a split fails extraction
+# here.
 lift() {
     python3 - "$1" "$2" <<'PY'
 import pathlib
@@ -241,6 +245,21 @@ def dedent(lines):
         sys.exit(f"unsubstituted template hole in a lifted block of {src}")
     return body
 
+def close_ifs(block, start, end):
+    # Close every `if` the region opened, so a burn nested in an if/else (or
+    # written as the condition of one) and a startup whose report sits inside
+    # its idle/work branch both lift whole.
+    depth = 0
+    for j in range(start, len(block)):
+        word = block[j].strip()
+        if word.startswith("if "):
+            depth += 1
+        elif word == "fi":
+            depth -= 1
+        if j >= end and depth == 0:
+            return j
+    return end
+
 rotate = startup = 0
 for text in texts:
     for block in fences(text):
@@ -260,18 +279,14 @@ for text in texts:
                             if 'gc bd mol burn "$CURRENT_WISP" --force' in block[j]), None)
                 if end is None:
                     sys.exit(f"{src}: a wisp resolution has no burn of $CURRENT_WISP in the same fenced block")
-                # Close every `if` the region opened, so a burn nested in an
-                # if/else (or written as the condition of one) lifts whole.
-                depth = 0
-                for j in range(start, len(block)):
-                    word = block[j].strip()
-                    if word.startswith("if "):
-                        depth += 1
-                    elif word == "fi":
-                        depth -= 1
-                    if j >= end and depth == 0:
-                        end = j
-                        break
+                end = close_ifs(block, start, end)
+                # An order-paced cycle ends by requesting a restart: keep it in
+                # the region so the legs can assert the cycle's true last call.
+                nxt = end + 1
+                while nxt < len(block) and not block[nxt].strip():
+                    nxt += 1
+                if nxt < len(block) and block[nxt].strip() == "gc runtime request-restart":
+                    end = nxt
                 rotate += 1
                 (out / f"rotate-{rotate}.sh").write_text(dedent(block[start : end + 1]))
                 i = end + 1
@@ -279,6 +294,7 @@ for text in texts:
             if line.startswith("PATROL_WISPS_JSON=$(gc bd list") and any(
                     'echo "Patrol wisp: $WISP"' in b for b in block[i:]):
                 end = next(j for j in range(i, len(block)) if 'echo "Patrol wisp: $WISP"' in block[j])
+                end = close_ifs(block, i, end)
                 startup += 1
                 (out / f"startup-{startup}.sh").write_text(dedent(block[i : end + 1]))
                 i = end + 1
@@ -431,6 +447,142 @@ rotate_legs() {
 }
 
 # ---------------------------------------------------------------------------
+# Legs for a deacon rotate region (resolve -> burn -> request restart).
+#
+# The `deacon-patrol-tick` order owns the deacon's cadence, so a rotation never
+# pours and never drains: it burns the wisp it was working and ends with
+# `gc runtime request-restart`. A self-poured successor would change the fresh
+# session's assigned work every cycle; a drain would restart without the wisp
+# being burned. Either one restores the hot loop this design exists to stop.
+# ---------------------------------------------------------------------------
+
+restart_requested() {
+    [ -n "$(tail -n 1 "$GC_LOG" 2>/dev/null)" ] &&
+        [ "$(tail -n 1 "$GC_LOG")" = "gc runtime request-restart" ]
+}
+
+deacon_rotate_legs() {
+    local region="$1" label="$2"
+
+    # The usual case: one open patrol wisp assigned, no GC_BEAD_ID.
+    seed_state "w-cur $FORMULA open $AGENT true 1"
+    run_region "$region"
+    [ "$RC" -eq 0 ] || fail "$label: burning the current open wisp must succeed (rc=$RC)"
+    has_id w-cur && fail "$label: the open current wisp was not resolved and burned (status half / --include-infra)"
+    [ ! -s "$STATE" ] || fail "$label: a wisp-owning cycle must not pour a successor: $(cat "$STATE")"
+    [ "$(count_calls 'gc bd mol wisp')" -eq 0 ] || fail "$label: poured a successor; the order owns the pour"
+    drained && fail "$label: a successful rotation must not drain the session"
+    restart_requested || fail "$label: a successful rotation must end by requesting a restart (last gc call: $(tail -n 1 "$GC_LOG"))"
+
+    # Status half, other side: an in_progress wisp is the current wisp too.
+    seed_state "w-cur $FORMULA in_progress $AGENT true 1"
+    run_region "$region"
+    [ "$RC" -eq 0 ] || fail "$label: burning an in_progress current wisp must succeed (rc=$RC)"
+    has_id w-cur && fail "$label: an in_progress current wisp was not burned"
+    restart_requested || fail "$label: an in_progress rotation must request a restart"
+
+    # No assigned wisp: burn nothing, pour nothing, and still request a restart.
+    seed_state
+    run_region "$region"
+    [ "$RC" -eq 0 ] || fail "$label: a cycle with no current wisp must end cleanly (rc=$RC)"
+    [ ! -s "$STATE" ] || fail "$label: poured a wisp with none assigned"
+    grep -F -q 'Could not resolve current deacon wisp; not burning.' "$LAST_OUT" ||
+        fail "$label: an empty hand must say it did not burn"
+    restart_requested || fail "$label: an empty hand must still request a restart"
+
+    # A failed list is not "no wisp": nothing is burned, nothing is poured.
+    seed_state "w-cur $FORMULA open $AGENT true 1"
+    run_region "$region" STUB_LIST_FAIL=1
+    has_id w-cur || fail "$label: burned the current wisp after a failed wisp query"
+    [ "$(count_calls 'gc bd mol wisp')" -eq 0 ] || fail "$label: poured after a failed wisp query"
+    restart_requested || fail "$label: a failed wisp query must still request a restart"
+
+    # An explicit GC_BEAD_ID names the wisp; the query is not consulted.
+    seed_state "w-old $FORMULA open $AGENT true 1" "w-cur $FORMULA open $AGENT true 2"
+    run_region "$region" GC_BEAD_ID=w-old
+    [ "$RC" -eq 0 ] || fail "$label: burning the GC_BEAD_ID wisp must succeed (rc=$RC)"
+    has_id w-old && fail "$label: GC_BEAD_ID named the current wisp but it was not burned"
+    has_id w-cur || fail "$label: burned a wisp GC_BEAD_ID did not name"
+    restart_requested || fail "$label: a named rotation must request a restart"
+
+    # An empty identity reaches no lookup: an empty --assignee is no filter.
+    seed_state "w-mine $FORMULA open $AGENT true 1" "w-theirs $FORMULA open other-city/agent true 2"
+    run_region "$region" GC_AGENT=
+    has_id w-mine || fail "$label: burned a patrol wisp with an empty GC_AGENT"
+    has_id w-theirs || fail "$label: burned another agent's patrol wisp with an empty GC_AGENT"
+    [ "$(count_calls 'gc bd mol wisp')" -eq 0 ] || fail "$label: poured with an empty GC_AGENT"
+    restart_requested || fail "$label: an empty GC_AGENT must still request a restart"
+
+    # Duplicates: the newest is the current wisp.
+    seed_state "w-old $FORMULA open $AGENT true 1" "w-new $FORMULA open $AGENT true 2"
+    run_region "$region"
+    [ "$RC" -eq 0 ] || fail "$label: rotating among duplicates must succeed (rc=$RC)"
+    has_id w-new && fail "$label: the newest patrol wisp must be the one resolved and burned"
+    restart_requested || fail "$label: a duplicate rotation must request a restart"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Legs for the deacon startup reconcile region. It adopts the wisp the order
+# assigned and never pours: an empty hand is the gap between ticks, printed as
+# IDLE, not a license to self-pour.
+# ---------------------------------------------------------------------------
+
+deacon_startup_legs() {
+    local region="$1" label="$2"
+
+    # Leaked surplus: keep the newest, burn the rest, pour nothing.
+    seed_state "w-1 $FORMULA open $AGENT true 1" "w-2 $FORMULA open $AGENT true 2" \
+        "w-3 $FORMULA open $AGENT true 3" "f-other mol-other-patrol open $AGENT true 4" \
+        "w-elsewhere $FORMULA open someone-else true 5"
+    run_region "$region"
+    [ "$RC" -eq 0 ] || fail "$label: reconciling leaked wisps must succeed (rc=$RC)"
+    [ "$(ids_where "$FORMULA" "$AGENT")" = "w-3" ] ||
+        fail "$label: expected only the newest wisp w-3 to survive, found: $(ids_where "$FORMULA" "$AGENT" | tr '\n' ' ')"
+    [ "$(count_calls 'gc bd mol wisp')" -eq 0 ] || fail "$label: poured a duplicate beside an assigned wisp"
+    has_id f-other || fail "$label: burned a molecule of another formula"
+    has_id w-elsewhere || fail "$label: burned another agent's wisp"
+    grep -F -q 'Patrol wisp: w-3' "$LAST_OUT" || fail "$label: did not report the surviving wisp"
+    drained && fail "$label: a successful reconcile must not drain the session"
+
+    # A surplus burn that fails is retried by a later startup, not fatal.
+    seed_state "w-1 $FORMULA open $AGENT true 1" "w-2 $FORMULA open $AGENT true 2"
+    run_region "$region" STUB_BURN_FAIL=1
+    [ "$RC" -eq 0 ] || fail "$label: a failed surplus burn must not stop the patrol (rc=$RC)"
+    grep -F -q 'Patrol wisp: w-2' "$LAST_OUT" || fail "$label: a failed surplus burn must still resume the newest wisp"
+
+    # An in_progress wisp is a patrol wisp too.
+    seed_state "w-1 $FORMULA open $AGENT true 1" "w-2 $FORMULA in_progress $AGENT true 2"
+    run_region "$region"
+    [ "$(ids_where "$FORMULA" "$AGENT")" = "w-2" ] || fail "$label: an in_progress wisp was not counted"
+    [ "$(count_calls 'gc bd mol wisp')" -eq 0 ] || fail "$label: poured beside an in_progress wisp"
+
+    # Nothing assigned: this is the gap between ticks, not a reason to pour.
+    seed_state
+    run_region "$region"
+    [ "$RC" -eq 0 ] || fail "$label: an empty hand must leave the session idle (rc=$RC)"
+    [ ! -s "$STATE" ] || fail "$label: self-poured a patrol wisp instead of waiting for the order"
+    grep -F -q 'IDLE: no assigned patrol wisp' "$LAST_OUT" || fail "$label: an empty hand must print the IDLE signal"
+    drained && fail "$label: the idle path must end the turn, not drain"
+
+    # A failed query is not "no wisp": burn nothing and report idle.
+    seed_state "w-1 $FORMULA open $AGENT true 1"
+    run_region "$region" STUB_LIST_FAIL=1
+    has_id w-1 || fail "$label: burned a wisp after a failed wisp query"
+    [ "$(count_calls 'gc bd mol wisp')" -eq 0 ] || fail "$label: poured after a failed wisp query"
+    grep -F -q 'IDLE: no assigned patrol wisp' "$LAST_OUT" || fail "$label: a failed query must report idle"
+
+    # An empty identity reaches no lookup: an empty --assignee is no filter,
+    # so the surplus burn would reach every agent's patrol wisps.
+    seed_state "w-mine $FORMULA open $AGENT true 1" "w-theirs $FORMULA open other-city/agent true 2"
+    run_region "$region" GC_AGENT=
+    has_id w-mine || fail "$label: burned a patrol wisp with an empty GC_AGENT"
+    has_id w-theirs || fail "$label: burned another agent's patrol wisp with an empty GC_AGENT"
+    [ "$(count_calls 'gc bd mol wisp')" -eq 0 ] || fail "$label: poured with an empty GC_AGENT"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Legs for a startup reconcile region.
 # ---------------------------------------------------------------------------
 
@@ -542,7 +694,7 @@ run_leg() {
     fi
 }
 
-# lifted_legs <asset> <formula> <agent> <want-rotate> <want-startup> <rotate-mode> <rotate-options>
+# lifted_legs <asset> <formula> <agent> <want-rotate> <want-startup> <profile> <rotate-options>
 lifted_legs() {
     local asset="$1" dir counts n
     FORMULA="$2"
@@ -551,13 +703,27 @@ lifted_legs() {
     counts=$(lift "$asset" "$dir") || fail "could not lift lifecycle blocks from $asset"
     # Behavior first, cardinality last: on a tree that predates a region shape
     # the legs that can run still report what the blocks actually do.
-    for n in $(seq 1 "${counts% *}"); do
+    # C-style loop rather than `seq`: BSD seq prints `1 0` for `seq 1 0`, which
+    # would make a file with no rotate regions try to run rotate-1.sh.
+    n=0
+    while [ "$n" -lt "${counts% *}" ]; do
+        n=$((n + 1))
         bash -n "$dir/rotate-$n.sh" || fail "$(basename "$asset") rotate region $n does not parse"
-        rotate_legs "$dir/rotate-$n.sh" "$(basename "$asset") rotate region $n" "$6" "$7"
+        if [ "$6" = deacon ]; then
+            deacon_rotate_legs "$dir/rotate-$n.sh" "$(basename "$asset") rotate region $n"
+        else
+            rotate_legs "$dir/rotate-$n.sh" "$(basename "$asset") rotate region $n" "$6" "$7"
+        fi
     done
-    for n in $(seq 1 "${counts#* }"); do
+    n=0
+    while [ "$n" -lt "${counts#* }" ]; do
+        n=$((n + 1))
         bash -n "$dir/startup-$n.sh" || fail "$(basename "$asset") startup region $n does not parse"
-        startup_legs "$dir/startup-$n.sh" "$(basename "$asset") startup region $n"
+        if [ "$6" = deacon ]; then
+            deacon_startup_legs "$dir/startup-$n.sh" "$(basename "$asset") startup region $n"
+        else
+            startup_legs "$dir/startup-$n.sh" "$(basename "$asset") startup region $n"
+        fi
     done
     [ "$counts" = "$4 $5" ] ||
         fail "$(basename "$asset"): expected $4 rotate and $5 startup region(s), lifted: $counts"
@@ -571,13 +737,11 @@ write_gc_stub
 # twice: against bd's own tier rule, and against gc >= 1.5.0, which appends
 # --include-infra to a molecule list. The status half is red under both.
 #
-# The last argument is the failure contract. Every startup drains on failure.
-# The deacon's rotations drain on every failure, a failed burn included, and
-# refuse an empty identity even when a wisp id is given. The refinery formula's
-# exit paths drain on failure; the refinery rotates in-session, so a failed
-# burn leaves an older wisp that newest-first resolution never picks and the
-# next startup burns. The refinery prompt's two rules are the formula's blocks
-# restated for the agent and stop without draining, as they always have.
+# The last arguments are the failure contract. The refinery's rotations drain on
+# failure; its prompt's two rules are the formula's blocks restated for the
+# agent and stop without draining. The deacon's rotations never pour, never
+# drain, and always end by requesting a restart; its startup adopts what the
+# `deacon-patrol-tick` order assigned and prints IDLE on an empty hand.
 for GC_APPENDS_INFRA in 0 1; do
     tier=$([ "$GC_APPENDS_INFRA" = 1 ] && echo "gc appends --include-infra" || echo "bd tier rule")
     run_leg "refinery formula exit paths ($tier)" lifted_legs \
@@ -585,9 +749,9 @@ for GC_APPENDS_INFRA in 0 1; do
     run_leg "refinery prompt lifecycle + startup ($tier)" lifted_legs \
         "$GASTOWN/agents/refinery/prompt.template.md" mol-refinery-patrol testrig/refinery 2 1 strict plain
     run_leg "deacon formula next-iteration ($tier)" lifted_legs \
-        "$GASTOWN/formulas/mol-deacon-patrol.toml" mol-deacon-patrol deacon 1 0 strict drain,burn-drains,id-guard
+        "$GASTOWN/formulas/mol-deacon-patrol.toml" mol-deacon-patrol deacon 1 0 deacon plain
     run_leg "deacon prompt fallback + startup ($tier)" lifted_legs \
-        "$GASTOWN/agents/deacon/prompt.template.md" mol-deacon-patrol deacon 1 1 bootstrap drain,burn-drains,id-guard
+        "$GASTOWN/agents/deacon/prompt.template.md" mol-deacon-patrol deacon 1 1 deacon plain
 done
 run_leg "wisp queries see the wisps tier and both statuses" static_legs \
     "$GASTOWN/formulas/mol-refinery-patrol.toml" "$GASTOWN/agents/refinery/prompt.template.md" \

@@ -1,24 +1,19 @@
 description = """
-Deacon patrol loop. Poured as a root-only wisp on startup:
+Deacon patrol loop. The `deacon-patrol-tick` order pours one root-only
+`mol-deacon-patrol` wisp per interval and assigns it to the deacon; the deacon
+never pours its own wisp.
 
-  WISP=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix='{{binding_prefix}}' --json | jq -r '.new_epic_id // empty')
-  gc bd update $WISP --assignee=$GC_AGENT
+Each wisp is ONE iteration: check inbox, run town-wide coordination tasks, burn
+the wisp. On crash, re-read the formula steps and determine where you left off
+from context (wisp state, last action).
 
-`--json` prints one multi-line object on stdout and gc writes config
-advisories to stderr: pipe the whole stdout into jq, never through
-`2>&1`, `tail`, or `head`.
+Formula steps are NOT materialized as child beads. Read the step descriptions
+below and work through them in order.
 
-Each wisp is ONE iteration: check inbox, run town-wide coordination
-tasks, pour the next iteration. On crash, re-read the formula steps
-and determine where you left off from context.
-
-Formula steps are NOT materialized as child beads. Read the step
-descriptions below and work through them in order.
-
-The loop mechanism: every exit path (happy or early) pours the next
-wisp before burning this one, after first resolving this one; it pours
-nothing when it cannot name this wisp. The prompt bootstraps the first wisp
-and, on every startup, reconciles your assigned patrol wisps to exactly one.
+The loop mechanism: EVERY step is one leg of the same wisp. Never exit the wisp
+from an intermediate step — either continue to the next step or jump directly
+to `next-iteration` to burn this one and request a restart. Exiting without
+burning leaks wisps; the order only pours when the deacon holds no patrol wisp.
 
 ## Deacon Role
 
@@ -39,8 +34,26 @@ core pack — no LLM needed. The retired maintenance pack no longer exists.
 ## Idle Town Principle
 
 The deacon should be silent/invisible when the town is healthy and idle.
-Skip health checks when no active work exists. Use exponential backoff
-between patrol cycles.
+Skip health checks when no active work exists. Do not patrol back to back:
+the `deacon-patrol-tick` order's interval is the pace.
+
+## Why the cadence is an order, not a self-poured loop
+
+The deacon backs a `mode = "always"` named session with `wake_mode = "fresh"`,
+so the controller fresh-cycles it the moment its assigned work changes. The
+patrol loop used to pour and assign its successor wisp before burning the
+current one: every cycle changed the deacon's assigned work, so the controller
+restarted it on the very next patrol pass (~30s) after a ~4.5-minute cycle —
+about 10 cycles an hour, ~330M tokens a day, on an idle town too.
+
+The cadence now comes from `orders/deacon-patrol-tick.toml`. At each tick the
+order pours one wisp when the deacon holds none, assigns it to the deacon, and
+nudges it. The deacon runs the wisp, burns it in `next-iteration`, and calls
+`gc runtime request-restart`; the restarted session finds no assigned work and
+ends its turn idle until the next tick. **The deacon never pours its own
+wisp.** `idle_timeout` is not set: the order's interval is the cadence.
+
+**Do not re-introduce `gc runtime drain-ack` or `exit` into this loop.**
 
 ## What the deacon does NOT do
 
@@ -49,6 +62,7 @@ between patrol cycles.
 - Code implementation (polecats do this)
 - Kill agents directly (files warrants, dog pool runs shutdown dance)
 - Pool sizing (controller pool reconciliation)
+- Pour its own patrol wisp (the `deacon-patrol-tick` order owns the cadence)
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-deacon-patrol"
@@ -57,10 +71,6 @@ formula = "mol-deacon-patrol"
 [vars.binding_prefix]
 description = "Import binding prefix for gastown agent identities, including trailing dot when bound."
 default = ""
-
-[vars.event_timeout]
-description = "Seconds to sleep before re-checking. Replaces former event-watch loop which hot-spun on cache-reconcile firehose."
-default = "60"
 
 [vars.witness_stale_min]
 description = "Minutes of witness heartbeat silence before health-scan's deterministic pass calls the patrol loop stalled. The default is 1.5x the witness idle_timeout (1h) — the longest legitimate silence for a healthy witness, and an order of magnitude under the multi-hour stalls this catches. Lower it only if your witness idle_timeout is lower."
@@ -575,12 +585,12 @@ Close this step after check."""
 
 [[steps]]
 id = "next-iteration"
-title = "Pour next iteration and loop"
+title = "Burn this wisp and request a restart"
 needs = ["system-health"]
 description = """
-**Config: event_timeout = {{event_timeout}}**
-
-End of patrol cycle. Pour the next iteration, then wait or exit.
+End of patrol cycle. Burn this wisp, then request a restart. Do NOT pour a next
+wisp: the `deacon-patrol-tick` order owns the cadence and pours and assigns the
+next one at its tick.
 
 **1. Context check:**
 
@@ -588,8 +598,9 @@ If context feels heavy or RSS is high:
 ```bash
 gc runtime request-restart
 ```
-This blocks forever. The controller restarts you. The next wisp
-is already assigned — the new session resumes from context.
+This sets `GC_RESTART_REQUESTED` metadata on the session and blocks forever.
+The controller restarts you on the next reconcile tick. The current wisp stays
+assigned; the restarted session's startup adopts it and resumes from context.
 
 **2. Quick inbox check (end-of-cycle hygiene):**
 ```bash
@@ -601,32 +612,21 @@ unread for the next cycle's `check-inbox` step — `gc mail peek <id>` shows one
 in full without marking it read. Archiving them here, unhandled, would bury
 them.
 
-**3. Resolve current wisp, pour next iteration, then burn this wisp (one script):**
+**3. Resolve this wisp, burn it, then request a restart (one script):**
 
-Run this as ONE script. The burn needs the `CURRENT_WISP` this script
-resolves, and a shell that forgot it between two blocks pours a successor and
-burns nothing. Resolve BEFORE pouring, and pour nothing when the current wisp
-cannot be named: a cycle that pours first and only then finds it cannot name
-its own wisp leaks one wisp per cycle. `$GC_BEAD_ID` is not set in a patrol
-session, and a patrol wisp stays `open` for its whole life (assigning it does
-not claim it), so the fallback query covers `open,in_progress` and the wisps
-tier (`--include-infra`), and selects only this formula's ephemeral roots.
+Run this as ONE script. `$GC_BEAD_ID` is not set in a patrol session, and a
+patrol wisp stays `open` for its whole life (assigning it does not claim it), so
+the fallback query covers `open,in_progress` and the wisps tier
+(`--include-infra`), and selects only this formula's ephemeral roots. An empty
+`GC_AGENT` reaches no lookup: `${GC_AGENT:?}` stops the query, because an empty
+`--assignee` is no filter and would match every deacon's patrol wisps.
 
-Every failure in this script drains (`gc runtime drain-ack`) instead of only
-stopping. Gas City moves an always-on deacon onto its next cycle when the wisp
-it was running is gone; a turn that ends with that wisp still open, or with no
-successor, is the deacon's last. A drained deacon is restarted, and its startup
-reconciles the patrol wisps. That covers a failed burn of this wisp too. An
-empty `GC_AGENT` stops the script first: an empty `--assignee` is no filter,
-so the lookup would match every deacon's patrol wisps.
+Burn the resolved `$CURRENT_WISP`, never a bare `$GC_BEAD_ID`: unset, the latter
+expands to an empty burn target, which reclaims nothing and silently leaves this
+wisp behind. If the burn fails, do not retry and do not pour: request the
+restart below, and the restarted session adopts the still-assigned wisp.
+
 ```bash
-# An empty GC_AGENT would assign the successor to nobody and widen the lookup
-# below to every deacon's patrol wisps: an empty --assignee is no filter.
-if [ -z "${GC_AGENT:-}" ]; then
-  echo "GC_AGENT is empty; not resolving, pouring or burning patrol wisps. Draining."
-  gc runtime drain-ack
-  exit 1
-fi
 # Preferring the spawn trigger is safe here only because the deacon is a
 # singleton with a fresh wake (agents/deacon/agent.toml: max_active_sessions = 1,
 # wake_mode = "fresh"), so one process env holds exactly one wisp and the
@@ -637,51 +637,23 @@ CURRENT_WISP=${GC_BEAD_ID:-${GC_TRIGGER_WORK_BEAD_ID:-}}
 if [ -z "$CURRENT_WISP" ]; then
   CURRENT_WISP=$(gc bd list --assignee="${GC_AGENT:?}" --status=open,in_progress --type=molecule --include-infra --limit=0 --json | jq -r '[.[] | select(.title == "mol-deacon-patrol" and .ephemeral == true)] | sort_by(.created_at, .id) | last | .id // empty')
 fi
-if [ -z "$CURRENT_WISP" ]; then
-  echo "Could not resolve the current deacon wisp; not pouring a successor."
-  gc runtime drain-ack
-  exit 1
+if [ -n "$CURRENT_WISP" ]; then
+  gc bd mol burn "$CURRENT_WISP" --force
+else
+  echo "Could not resolve current deacon wisp; not burning."
 fi
-
-NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix='{{binding_prefix}}' --json | jq -r '.new_epic_id // empty')
-if [ -z "$NEXT" ]; then
-  echo "Could not pour next deacon wisp; not burning."
-  gc runtime drain-ack
-  exit 1
-fi
-if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
-  echo "Could not assign next deacon wisp; not burning."
-  # Unassigned, no assignee-scoped query can ever find it again: reclaim it by id.
-  gc bd mol burn "$NEXT" --force || echo "Could not burn the unassigned deacon wisp $NEXT; burn it by hand."
-  gc runtime drain-ack
-  exit 1
-fi
-if ! gc bd mol burn "$CURRENT_WISP" --force; then
-  echo "Could not burn deacon wisp $CURRENT_WISP; draining so a restarted deacon reconciles it."
-  gc runtime drain-ack
-  exit 1
-fi
+gc runtime request-restart
 ```
 
-**4. Burn this wisp before waiting:**
+**4. Let the restart happen:**
 
-Step 3's script already burned it: the burn lives in that script because it
-needs the `CURRENT_WISP` the script resolved.
+The script above ends with `gc runtime request-restart`, which blocks until the
+controller restarts you. The new session wakes with no assigned wisp (or adopts
+one that a failed burn left behind), and the `deacon-patrol-tick` order brings
+the next cycle on its interval.
 
-Do not sleep with the current wisp still open. The backoff belongs to the
-already-assigned successor wisp; if the session restarts during the sleep, the
-successor remains the single resumable patrol item.
+Do NOT pour a next wisp, do NOT call `gc runtime drain-ack`, and do NOT `exit`:
+the order owns the cadence, and a self-poured successor restarts the fresh-cycle
+loop this design exists to stop.
 
-**5. Exit this turn:**
-Write exactly:
-```
-IDLE: no work, exiting turn.
-```
-Then stop immediately. Do NOT sleep, call ScheduleWakeup, use Monitor, or
-run `gc hook` to start the next cycle yourself: re-entering the loop from
-inside this turn is a busy loop that never ends a turn. Ending the turn is
-the only pacing between cycles; no sleep or idle-timeout policy paces an
-always-on deacon. Gas City restarts this session on the already-assigned
-successor wisp on a later pass, and the restarted session resumes from it.
-
-**Exit criteria:** Next wisp poured and assigned, this wisp burned, turn ended with IDLE signal."""
+**Exit criteria:** This wisp burned, restart requested, no successor poured."""
