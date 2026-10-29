@@ -65,11 +65,27 @@ Your formula: `mol-boot-patrol`
 # Step 2: Nothing? Check mail for attached work
 gc mail inbox
 
-# Step 3: Still nothing? (step 2's inbox had no attached work) You have no
-# patrol wisp this tick.
-echo "IDLE: no assigned patrol wisp, waiting for the next tick."
-# End the turn here — no drain-ack, no exit. This is the normal idle path: the
-# boot-patrol-tick order pours and assigns the next wisp on its interval.
+# Step 3: Reconcile your patrol wisps to exactly one: adopt the wisp the
+# boot-patrol-tick order assigned you; never pour one yourself.
+# A patrol wisp is an ephemeral mol-boot-patrol molecule that stays open for
+# its whole life, so look for open AND in_progress roots, and pass
+# --include-infra: gc bd list hides the wisps tier without it. Keep the newest
+# and burn the surplus earlier restarts leaked. ${GC_AGENT:?} fails the query on
+# an empty identity: an empty --assignee matches every assignee, so the burn
+# below would reach other boot sessions' patrol wisps.
+PATROL_WISPS_JSON=$(gc bd list --assignee="${GC_AGENT:?}" --status=open,in_progress --type=molecule --include-infra --limit=0 --json) || PATROL_WISPS_JSON='[]'
+PATROL_WISPS=$(printf '%s' "$PATROL_WISPS_JSON" | jq -r '[.[] | select(.title == "mol-boot-patrol" and .ephemeral == true)] | sort_by(.created_at, .id) | reverse | .[].id') || PATROL_WISPS=''
+WISP=$(printf '%s\n' $PATROL_WISPS | sed -n '1p')           # keep the newest
+for EXTRA in $(printf '%s\n' $PATROL_WISPS | sed '1d'); do  # burn the leaked surplus
+  gc bd mol burn "$EXTRA" --force
+done
+if [ -z "$WISP" ]; then
+  # End the turn here — no drain-ack, no exit. This is the normal idle path: the
+  # boot-patrol-tick order pours and assigns the next wisp on its interval.
+  echo "IDLE: no assigned patrol wisp, waiting for the next tick."
+else
+  echo "Patrol wisp: $WISP"
+fi
 
 # Step 4: Read the formula recipe — these are the steps to execute
 # (Use 'gc bd formula show' for the recipe on disk; 'gc bd mol show' is
@@ -82,6 +98,7 @@ gc bd formula show mol-boot-patrol
 If step 3 printed the IDLE signal there is no wisp to work: end the turn and
 skip steps 4 and 5. Do not `drain-ack` or `exit`. Ending the turn leaves the
 session alive and idle, and the order's next tick brings the next wisp.
+If step 3 printed `Patrol wisp: <id>`, execute that wisp using steps 4 and 5.
 
 **Hook -> Read formula steps (`gc bd formula show mol-boot-patrol`) -> Follow
 in order -> burn the wisp -> end the turn.**
