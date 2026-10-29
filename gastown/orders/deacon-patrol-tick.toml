@@ -1,0 +1,8 @@
+[order]
+description = "Pour the deacon's next patrol wisp and nudge it. The 15m interval is the deacon's cadence."
+# City-scoped: the deacon is a single city-level named session.
+scope = "city"
+trigger = "cooldown"
+interval = "15m"
+exec = "bash $GC_PACK_DIR/assets/scripts/deacon-patrol-tick.sh"
+timeout = "1m"

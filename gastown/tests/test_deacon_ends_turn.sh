@@ -1,23 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Coverage for the deacon's between-cycles contract (gastownhall/gascity#5727).
+# Coverage for the deacon's between-cycles contract.
 #
-# The deacon is an always-on session, and no sleep or idle-timeout policy paces
-# it. What paces it is ending the turn: next-iteration pours the successor
-# wisp, burns the current one and ends the turn, and Gas City restarts the
-# session on the successor on a later pass. The prompt used to say the
-# opposite ("No Idle State ... run `gc hook` immediately"), and its
-# crash-recovery fallback ended in `gc hook`, so a deacon re-entered its own
-# loop from inside the turn and patrolled back to back on an idle town; the
-# formula told it a session_sleep policy would restart it, which never engages
-# for an always-on session.
+# The deacon is an always-on session, and the `deacon-patrol-tick` order paces
+# it: the order pours and assigns one patrol wisp per 15-minute tick and nudges
+# the deacon. The deacon runs the wisp, burns it in `next-iteration`, and calls
+# `gc runtime request-restart`. The restarted session finds no assigned wisp,
+# prints the IDLE signal, and ends its turn until the next tick. The deacon
+# must never pour its own successor: self-pouring changes its assigned work
+# every cycle, so the controller fresh-cycles the wake_mode="fresh" session in
+# a hot loop instead of waiting for the order.
 #
-# The fallback must also never just end the turn. Gas City moves an always-on
-# deacon onto its next cycle only when the wisp it was running is gone, and a
-# fallback that could not rotate the patrol wisps leaves that wisp open, so it
-# ends by draining (`gc runtime drain-ack`): the restarted deacon's startup
-# picks the patrol up again.
+# The crash-recovery fallback must do the same: resolve the wisp it was
+# working, burn it, and request a restart. It never drains
+# (`gc runtime drain-ack`) and never pours a successor; a failed burn leaves
+# the wisp assigned for the restarted session's startup to adopt.
 #
 # The fallback is LIFTED out of the prompt and executed against a stub `gc`
 # that records every call; the rest is pinned on the shipped text. Point
@@ -113,13 +111,17 @@ leg_prompt_ends_the_turn() {
     if grep -n -F 'No Idle State' "$PROMPT"; then
         fail "deacon prompt still forbids the idle state that is the deacon's correct resting state between cycles"
     fi
-    grep -F -q -- '-> pour next iteration -> end your turn.' "$PROMPT" ||
-        fail "deacon prompt's loop summary must end the turn after pouring the next iteration"
-    grep -F -q 'The fallback ends by draining the session' "$PROMPT" ||
-        fail "deacon prompt's crash-recovery fallback must say it ends by draining the session"
+    grep -F -q -- '-> burn the wisp -> request a restart.' "$PROMPT" ||
+        fail "deacon prompt's loop summary must burn the wisp and request a restart"
+    grep -F -q 'The fallback ends by requesting a restart' "$PROMPT" ||
+        fail "deacon prompt's crash-recovery fallback must say it ends by requesting a restart"
+    ! grep -F -q 'Pour next wisp' "$PROMPT" ||
+        fail "deacon prompt must not offer a pour-next-wisp command; the deacon-patrol-tick order owns the cadence"
+    ! grep -F -q 'gc bd mol wisp mol-deacon-patrol' "$PROMPT" ||
+        fail "deacon prompt must never pour its own patrol wisp"
 }
 
-leg_formula_ends_the_turn_truthfully() {
+leg_formula_burns_and_restarts() {
     local step
     step=$(python3 - "$FORMULA" <<'PY'
 import sys
@@ -129,15 +131,19 @@ with open(sys.argv[1], "rb") as handle:
 print(next(s for s in steps if s["id"] == "next-iteration")["description"])
 PY
 )
-    printf '%s\n' "$step" | grep -F -q 'IDLE: no work, exiting turn.' ||
-        fail "next-iteration must end the turn with the IDLE signal"
+    printf '%s\n' "$step" | grep -F -q 'gc runtime request-restart' ||
+        fail "next-iteration must end by requesting a restart"
+    printf '%s\n' "$step" | grep -F -q 'no successor poured' ||
+        fail "next-iteration must state that it pours no successor"
+    printf '%s\n' "$step" | grep -F -q 'Could not resolve current deacon wisp; not burning.' ||
+        fail "next-iteration must handle an unresolved current wisp"
+    ! printf '%s\n' "$step" | grep -F -q 'gc bd mol wisp mol-deacon-patrol' ||
+        fail "next-iteration must never pour a successor wisp; the order owns the pour"
+    ! printf '%s\n' "$step" | grep -Eq '^[[:space:]]*gc runtime drain-ack[[:space:]]*$' ||
+        fail "next-iteration must not run gc runtime drain-ack; the order owns the cadence"
     if printf '%s\n' "$step" | grep -n -i 'session_sleep policy will restart'; then
         fail "next-iteration still promises a session_sleep restart; no sleep policy applies to an always-on deacon"
     fi
-    printf '%s\n' "$step" | grep -F -q 'run `gc hook` to start the next cycle yourself' ||
-        fail "next-iteration must say not to re-enter the loop with gc hook"
-    printf '%s\n' "$step" | grep -F -q 'the restarted session resumes from it' ||
-        fail "next-iteration must hand the successor to the restarted session"
 }
 
 lift_fallback() {
@@ -196,19 +202,28 @@ leg_fallback_executes_without_reentering() {
     if grep -E -q '^gc hook( |$)' "$GC_LOG"; then
         fail "the crash-recovery fallback ran gc hook and re-entered the patrol loop inside the turn"
     fi
-    grep -F -q 'gc bd mol wisp mol-deacon-patrol' "$GC_LOG" ||
-        fail "the fallback did not run as far as pouring the next wisp; the leg measured nothing"
+    ! grep -q '^gc bd mol wisp' "$GC_LOG" ||
+        fail "the fallback poured a successor; the deacon-patrol-tick order owns the pour"
+    grep -q '^gc runtime request-restart$' "$GC_LOG" ||
+        fail "the fallback did not end by requesting a restart; the leg measured nothing"
 }
 
-# Whatever the fallback managed to do, it must end with a drain, or a deacon
-# whose current wisp is still open never gets another cycle.
-leg_fallback_ends_with_drain() {
+# Whatever the fallback managed to do, it must end by requesting a restart, or
+# a deacon whose current wisp is still open never gets another cycle.
+leg_fallback_ends_with_restart() {
     local state
     for state in empty current; do
         run_fallback "$state"
-        [ "$(tail -n 1 "$GC_LOG")" = "gc runtime drain-ack" ] ||
-            fail "with the deacon's patrol wisp state '$state', the fallback must end with gc runtime drain-ack (last gc call: $(tail -n 1 "$GC_LOG"))"
+        [ "$(tail -n 1 "$GC_LOG")" = "gc runtime request-restart" ] ||
+            fail "with the deacon's patrol wisp state '$state', the fallback must end with gc runtime request-restart (last gc call: $(tail -n 1 "$GC_LOG"))"
+        ! grep -q '^gc runtime drain-ack$' "$GC_LOG" ||
+            fail "with state '$state', the fallback must not drain; the order owns the cadence"
+        ! grep -q '^gc bd mol wisp' "$GC_LOG" ||
+            fail "with state '$state', the fallback must not pour a successor"
     done
+    run_fallback current
+    grep -q '^gc bd mol burn wisp-1 --force$' "$GC_LOG" ||
+        fail "with the deacon's current wisp assigned, the fallback must burn it"
 }
 
 LEG_NAMES=()
@@ -228,9 +243,9 @@ run_leg() {
 
 run_leg "no deacon script runs gc hook" leg_no_fence_reenters_the_loop
 run_leg "prompt ends the turn between cycles" leg_prompt_ends_the_turn
-run_leg "next-iteration ends the turn, no sleep-policy promise" leg_formula_ends_the_turn_truthfully
+run_leg "next-iteration burns and requests a restart" leg_formula_burns_and_restarts
 run_leg "fallback executes without re-entering the loop" leg_fallback_executes_without_reentering
-run_leg "fallback ends with a drain, whatever state it meets" leg_fallback_ends_with_drain
+run_leg "fallback ends with a restart, never a pour" leg_fallback_ends_with_restart
 
 echo "--- leg summary (tree: $TREE) ---"
 failed=0

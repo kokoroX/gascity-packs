@@ -122,8 +122,9 @@ test_shutdown_dance_lifecycle_and_audit_contracts() {
 #     first. The spawn trigger is fixed at wake and is not advanced by
 #     `gc hook --claim`, so under contention it names a bead this session never
 #     claimed - and the dance closes whatever it resolves.
-#   deacon patrol formula (singleton, wake_mode = "fresh", pours the next wisp
-#     then EXITS the turn) - may prefer the trigger: one process env holds
+#   deacon patrol formula (singleton, wake_mode = "fresh"; the
+#     deacon-patrol-tick order pours, and the deacon burns the wisp then
+#     requests a restart) - may prefer the trigger: one process env holds
 #     exactly one wisp for its whole life.
 #   refinery patrol formula (singleton too, but re-reads the formula steps
 #     in-session after burning) - bare ${GC_BEAD_ID:-} plus a live assignee
@@ -181,15 +182,16 @@ test_work_bead_resolution_discriminator_is_pinned() {
         fail "the deacon's trigger-first wisp resolution is safe only on a fresh wake; agent.toml no longer pins wake_mode"
 
     # The third precondition lives in the formula, not in agent.toml, so neither
-    # pin above can ever catch its loss: the deacon pours the successor, burns
-    # this wisp, and EXITS the turn, so one process env holds exactly one wisp
-    # for its whole life and the restarted session gets a fresh trigger. An
-    # in-session loop here revives the stale-trigger failure with both config
-    # pins still green.
-    grep -F 'IDLE: no work, exiting turn.' "$deacon" >/dev/null ||
-        fail "the deacon's trigger-first wisp resolution is safe only while each iteration ends by exiting the turn; mol-deacon-patrol.toml no longer emits the IDLE exit signal"
-    grep -F 'the restarted session resumes from it' "$deacon" >/dev/null ||
-        fail "the deacon's trigger-first wisp resolution is safe only while the successor wisp is resumed by a RESTARTED session (fresh trigger); mol-deacon-patrol.toml no longer hands the successor to a restarted session"
+    # pin above can ever catch its loss. It no longer rests on the deacon pouring
+    # its own successor — the `deacon-patrol-tick` order owns the pour. What must
+    # stay true is that the wisp never advances in-session: one process env holds
+    # exactly one wisp for its whole life and every cycle burns it and requests a
+    # restart, so the spawn trigger cannot go stale mid-loop. An in-session loop
+    # here revives the stale-trigger failure with both config pins still green.
+    grep -F 'no successor poured' "$deacon" >/dev/null ||
+        fail "the deacon's trigger-first wisp resolution is safe only while each cycle burns its wisp and requests a restart without pouring a successor; mol-deacon-patrol.toml no longer states that exit criterion"
+    ! grep -F 'gc bd mol wisp mol-deacon-patrol' "$deacon" >/dev/null ||
+        fail "the deacon must not pour its own wisp: a self-poured successor advances the wisp in-session and makes the spawn trigger stale mid-loop; gastown/orders/deacon-patrol-tick.toml owns the pour"
     ! grep -F 're-read formula steps to begin' "$deacon" >/dev/null ||
         fail "the deacon now rotates wisps in-session like the refinery, so its spawn trigger goes stale mid-loop; mol-deacon-patrol.toml must drop the trigger-preferring resolution for the bare \${GC_BEAD_ID:-} plus live assignee query"
 
@@ -654,6 +656,36 @@ test_boot_never_pours_its_own_wisp() {
         fail "boot-patrol-tick must run the pack-local boot-patrol-tick.sh script"
 }
 
+test_deacon_never_pours_its_own_wisp() {
+    local order="$GASTOWN/orders/deacon-patrol-tick.toml"
+    local formula="$GASTOWN/formulas/mol-deacon-patrol.toml"
+    local script="$GASTOWN/assets/scripts/deacon-patrol-tick.sh"
+
+    parse_toml "$order" "$formula" "$GASTOWN/agents/deacon/agent.toml"
+
+    # The cooldown order owns the deacon's cadence. If the deacon pours its own
+    # successor, its assigned work changes every cycle; the controller then
+    # fresh-cycles a wake_mode="fresh" session in a hot loop, so the model runs
+    # back to back on an idle town. The order's script is the only pour site.
+    ! grep -R -F 'gc bd mol wisp mol-deacon-patrol' "$GASTOWN/agents/deacon" >/dev/null ||
+        fail "agents/deacon must never pour its own patrol wisp; gastown/orders/deacon-patrol-tick.toml owns the pour"
+    ! grep -F 'gc bd mol wisp mol-deacon-patrol' "$formula" >/dev/null ||
+        fail "mol-deacon-patrol must never pour its own successor wisp; gastown/orders/deacon-patrol-tick.toml owns the pour"
+
+    # ...and the one allowed pour site must actually be there, or nothing is.
+    grep -F 'gc bd mol wisp mol-deacon-patrol' "$script" >/dev/null ||
+        fail "assets/scripts/deacon-patrol-tick.sh must pour the deacon's patrol wisp; the agent assets must not"
+
+    [[ -f "$order" ]] ||
+        fail "missing gastown/orders/deacon-patrol-tick.toml"
+    grep -F 'trigger = "cooldown"' "$order" >/dev/null ||
+        fail "deacon-patrol-tick must be a cooldown order; its interval is the deacon's cadence"
+    grep -F 'interval = "15m"' "$order" >/dev/null ||
+        fail "deacon-patrol-tick must own the deacon's 15m cadence"
+    grep -F 'exec = "bash $GC_PACK_DIR/assets/scripts/deacon-patrol-tick.sh"' "$order" >/dev/null ||
+        fail "deacon-patrol-tick must run the pack-local deacon-patrol-tick.sh script"
+}
+
 test_refinery_direct_merge_is_worktree_safe_and_fail_closed() {
     local formula direct_block
     formula="$GASTOWN/formulas/mol-refinery-patrol.toml"
@@ -909,6 +941,7 @@ test_boot_wisp_queries_pin_include_infra
 test_boot_patrol_burn_resolves_current_wisp
 test_boot_deacon_observation_query_sees_wisps_tier
 test_boot_never_pours_its_own_wisp
+test_deacon_never_pours_its_own_wisp
 test_refinery_direct_merge_is_worktree_safe_and_fail_closed
 test_refinery_rebase_guidance_matches_the_guarded_step
 test_refinery_pre_existing_failures_use_city_store
