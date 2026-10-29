@@ -210,7 +210,7 @@ else
   gc bd update "$WISP" --assignee="$GC_AGENT" --status=in_progress
 fi
 
-# Step 3: Execute — read formula steps and work through them in order
+# Step 3: Execute — read ONE formula step at a time (see below), in order
 ```
 
 `gc bd mol wisp --json` prints one multi-line JSON object on stdout, and gc
@@ -219,7 +219,19 @@ stdout straight into `jq` as above. Never add `2>&1`, `tail`, or `head` to a
 `--json` pipeline: jq then sees a fragment, the ID comes back empty, and the
 wisp that was just poured is left unassigned.
 
-**Hook -> Read formula steps -> Follow in order -> pour next iteration -> run `gc hook`.**
+Read the steps one at a time, never the whole recipe: `gc formula show
+mol-witness-patrol --json | jq -r '.steps[] | .id + " - " + (.title // "")'`
+for the running order, then `... | jq -r '.steps[] | select(.id ==
+"mol-witness-patrol.recover-orphaned-beads") | .description'` for the body of
+the step you are on — ids there are the formula name plus the step id. The JSON stays in the
+pipe; only jq's output reaches your context. Never print the whole `--json`,
+`Read` the formula file, or read either back from a persisted-output file —
+that is the entire recipe in context, recharged on every later call this
+session. `recover-orphaned-beads` ends the recovery branch when it finds no
+orphan candidates (the normal case): skip the three steps it names without
+reading them.
+
+**Hook -> Read one step -> Follow in order -> pour next iteration -> run `gc hook`.**
 
 ## CRITICAL: No Idle State Between Cycles
 
@@ -289,7 +301,8 @@ If your context is filling up during patrol:
 gc runtime request-restart
 ```
 This blocks until the controller kills your session. The new session
-re-reads formula steps and resumes from context.
+re-reads the steps it needs — one at a time, as above — and resumes from
+context.
 
 ---
 
