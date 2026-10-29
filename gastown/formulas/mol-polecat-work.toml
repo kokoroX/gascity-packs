@@ -131,7 +131,7 @@ if git show-ref --verify --quiet "$BASE_REMOTE"; then
           --set-metadata gc.routed_to="" \
           --set-metadata halt_reason=base_branch_diverged \
           --append-notes "Workspace halted: reconcile or push base branch {{base_branch}}, then re-sling this bead." || exit 1
-        gc mail send "$WITNESS_TARGET" -s "polecat halted: base_branch_diverged ($WORK_BEAD_ID)" -m "Local {{base_branch}} is not an ancestor of the copy on origin; $WORK_BEAD_ID cannot pick a fork point. Reconcile the branch."
+        gc mail send "$WITNESS_TARGET" --notify -s "polecat halted: base_branch_diverged ($WORK_BEAD_ID)" -m "Local {{base_branch}} is not an ancestor of the copy on origin; $WORK_BEAD_ID cannot pick a fork point. Reconcile the branch."
         STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
         STEP_BEAD=$(gc bd show "$STEP_BEAD_ID" --json) || exit 1
         printf '%s' "$STEP_BEAD" | jq -e '(if type == "array" then .[0] else . end) | .status == "in_progress" and ((.metadata["gc.step_ref"] // "") | endswith(".workspace-setup"))' >/dev/null || { echo "workspace-setup: current claim $STEP_BEAD_ID is not this in-progress step; not acknowledging drain" >&2; exit 1; }
@@ -151,7 +151,7 @@ else
       --set-metadata gc.routed_to="" \
       --set-metadata halt_reason=base_branch_missing \
       --append-notes "Workspace halted: fix the rig/bead base configuration for {{base_branch}}, then re-sling this bead." || exit 1
-    gc mail send "$WITNESS_TARGET" -s "polecat halted: base_branch_missing ($WORK_BEAD_ID)" -m "Base branch {{base_branch}} exists neither on origin nor locally in this clone. $WORK_BEAD_ID cannot start until the rig/bead base configuration is fixed."
+    gc mail send "$WITNESS_TARGET" --notify -s "polecat halted: base_branch_missing ($WORK_BEAD_ID)" -m "Base branch {{base_branch}} exists neither on origin nor locally in this clone. $WORK_BEAD_ID cannot start until the rig/bead base configuration is fixed."
     STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
     STEP_BEAD=$(gc bd show "$STEP_BEAD_ID" --json) || exit 1
     printf '%s' "$STEP_BEAD" | jq -e '(if type == "array" then .[0] else . end) | .status == "in_progress" and ((.metadata["gc.step_ref"] // "") | endswith(".workspace-setup"))' >/dev/null || { echo "workspace-setup: current claim $STEP_BEAD_ID is not this in-progress step; not acknowledging drain" >&2; exit 1; }
@@ -983,7 +983,7 @@ if [ -n "$META_UNREADABLE" ]; then
     --set-metadata halt_reason=metadata_unreadable \
     --set-metadata gc.routed_to="" \
     --append-notes "Branch ready: the push gate could not read this bead's push decision — the ledger read returned no bead record, the metadata came in a shape the probe cannot decode, or auto_push carried a value outside the vocabulary (false/no/0 to halt, true/yes/1 to push). A decision that cannot be read cannot be shown to lack auto_push=false, so the gate halted instead of pushing. Re-record the push decision in the vocabulary, then re-sling."
-  gc mail send "${GC_RIG:+$GC_RIG/}{{binding_prefix}}witness" \
+  gc mail send "${GC_RIG:+$GC_RIG/}{{binding_prefix}}witness" --notify \
     -s "HELP: push-gate metadata unreadable on $WORK_BEAD_ID [HIGH]" \
     -m "Halted at branch-ready instead of pushing.
 
@@ -1114,7 +1114,7 @@ if [ -z "$AUTO_PUSH" ]; then
       --set-metadata halt_reason=no_push_rail_unresolved \
       --set-metadata gc.routed_to="" \
       --append-notes "Branch ready: DESCRIPTION/NOTES assert a no-push rail but the bead carries no auto_push metadata, so the rail is unenforceable. Halted instead of guessing. Whoever owns the rail: set auto_push=false to confirm the halt, or auto_push=true to authorise the push, then re-sling."
-    gc mail send "${GC_RIG:+$GC_RIG/}{{binding_prefix}}witness" \
+    gc mail send "${GC_RIG:+$GC_RIG/}{{binding_prefix}}witness" --notify \
       -s "HELP: no-push rail unresolved on $WORK_BEAD_ID [HIGH]" \
       -m "Halted at branch-ready instead of pushing.
 
@@ -1156,7 +1156,7 @@ if ! git show-ref --verify --quiet "refs/remotes/origin/{{base_branch}}"; then
     --set-metadata halt_reason=base_branch_local_only \
     --set-metadata gc.routed_to="" \
     --append-notes "Branch ready: base branch {{base_branch}} does not exist on origin, so the refinery cannot merge it. Push the base branch, then re-run submit-and-exit."
-  gc mail send "${GC_RIG:+$GC_RIG/}{{binding_prefix}}witness" -s "polecat halted: base_branch_local_only ($WORK_BEAD_ID)" -m "Work is committed on branch $BRANCH, but base branch {{base_branch}} does not exist on origin, so the refinery cannot merge it. Push the base branch, then re-run submit-and-exit for $WORK_BEAD_ID."
+  gc mail send "${GC_RIG:+$GC_RIG/}{{binding_prefix}}witness" --notify -s "polecat halted: base_branch_local_only ($WORK_BEAD_ID)" -m "Work is committed on branch $BRANCH, but base branch {{base_branch}} does not exist on origin, so the refinery cannot merge it. Push the base branch, then re-run submit-and-exit for $WORK_BEAD_ID."
   STEP_BEAD_ID=$(gc hook current --id-only) || exit 1  # drain-ack gives back every claim this session still holds, so close this step first
   STEP_BEAD=$(gc bd show "$STEP_BEAD_ID" --json) || exit 1
   printf '%s' "$STEP_BEAD" | jq -e '(if type == "array" then .[0] else . end) | .status == "in_progress" and ((.metadata["gc.step_ref"] // "") | endswith(".submit-and-exit"))' >/dev/null || { echo "submit-and-exit: current claim $STEP_BEAD_ID is not this in-progress step; not acknowledging drain" >&2; exit 1; }

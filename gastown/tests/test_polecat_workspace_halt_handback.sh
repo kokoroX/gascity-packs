@@ -149,8 +149,11 @@ esac
                   and ["bd", "show", "step-1", "--json"] in calls,
                   reason + ": current step was not resolved and read")
             mails = [a for a in calls if a[:2] == ["mail", "send"]]
-            check(len(mails) == 1 and mails[0][2] == "testrig/gastown.witness"
-                  and reason in mails[0][4], reason + ": witness mail missing")
+            check(len(mails) == 1, reason + ": witness mail missing")
+            mail = mails[0]
+            check(mail[2] == "testrig/gastown.witness" and "-s" in mail
+                  and reason in mail[mail.index("-s") + 1], reason + ": witness mail missing")
+            check("--notify" in mail, reason + ": witness mail lacks --notify")
 
         # A claim for another step or a step no longer running must not be
         # closed. Failed reads and writes must not acknowledge drain either.

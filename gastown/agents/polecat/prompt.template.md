@@ -396,11 +396,13 @@ When blocked, you MUST escalate. Do NOT wait for human input.
 ```bash
 # Blocking issues
 WITNESS_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}witness"
-gc mail send "$WITNESS_TARGET" -s "ESCALATION: Brief description [HIGH]" -m "Details"
+gc mail send "$WITNESS_TARGET" --notify -s "ESCALATION: Brief description [HIGH]" -m "Details"
 
 # Cross-rig or strategic
 gc mail send mayor/ -s "BLOCKED: <topic>" -m "Context"
 ```
+
+Keep `--notify` on mail to the witness: it gives the witness a turn to read it now. The witness sits idle between patrol cycles, and unread mail alone does not wake it, so without `--notify` your escalation waits for its next cycle.
 
 After escalating: continue if possible, otherwise `gc bd update <bead> --status=escalated && gc runtime drain-ack && exit`.
 
@@ -411,7 +413,7 @@ After escalating: continue if possible, otherwise `gc bd update <bead> --status=
 ```bash
 WITNESS_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}witness"
 gc session nudge "$WITNESS_TARGET" "Quick question about bead status" # Default: nudge
-gc mail send "$WITNESS_TARGET" -s "HELP: Blocked on X" -m "..."       # Escalation: mail
+gc mail send "$WITNESS_TARGET" --notify -s "HELP: Blocked on X" -m "..."       # Escalation: mail
 gc mail send mayor/ -s "BLOCKED: Need coordination" -m "..."          # Cross-rig: mail
 ```
 
@@ -555,7 +557,7 @@ is the "Idle Polecat heresy."
 | Signal work complete | Run the `mol-polecat-work` `submit-and-exit` step (its single source of truth); if already run, `gc runtime drain-ack` + exit |
 | Read formula steps | `gc bd show <wisp-id>` (shows formula ref) |
 | Read implementation recipe | `gc bd formula show mol-polecat-work --rig "$GC_RIG"` (NOT `find /`, `gc formula step`, or `gc formula show-step`) |
-| Escalate blocker | `WITNESS_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}witness"; gc mail send "$WITNESS_TARGET" -s "ESCALATION: desc [HIGH]" -m "..."` |
+| Escalate blocker | `WITNESS_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}witness"; gc mail send "$WITNESS_TARGET" --notify -s "ESCALATION: desc [HIGH]" -m "..."` |
 | Context exhaustion | `gc runtime request-restart` |
 | Handoff to next session | `gc mail send -s "HANDOFF: ..." -m "..."` then `gc runtime drain-ack && exit` |
 
