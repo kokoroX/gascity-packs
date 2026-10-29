@@ -2,8 +2,8 @@
 #
 # boot-patrol-tick.sh — start one boot watchdog cycle.
 #
-# Plumbing only: keep exactly one patrol wisp assigned to boot and nudge it.
-# Judging the deacon stays with boot.
+# Plumbing only: assign one patrol wisp to boot, or nudge it if it already
+# holds one. Judging the deacon stays with boot.
 
 set -euo pipefail
 
@@ -36,7 +36,10 @@ if [[ -z "$held" ]]; then
     echo "could not assign boot patrol wisp $wisp" >&2
     exit 1
   fi
+  # Assignment triggers a fresh-cycle with a startup nudge; nudging the old
+  # session would waste requests before the controller replaces it.
   echo "poured $wisp for $boot"
+  exit 0
 else
   echo "$boot already holds: $held"
 fi

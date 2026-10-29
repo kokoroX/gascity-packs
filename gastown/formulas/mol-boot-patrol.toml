@@ -12,7 +12,7 @@ descriptions below and work through them in order.
 
 The loop mechanism: EVERY step is one leg of the same wisp. Never exit the
 wisp from an intermediate step — either continue to the next step or jump
-directly to `finish` to burn this one and request a restart. Exiting without
+directly to `finish` to burn this one and end the turn. Exiting without
 burning leaks wisps; the order only pours when boot holds no patrol wisp.
 
 ## Boot Role
@@ -29,22 +29,24 @@ refineries, or polecats — the deacon and witnesses do that.
 Boot backs a `mode = "always"` named session, which is *unconditionally
 desired*: the moment its provider session goes away, the controller
 re-materializes it. A single-pass agent that ends every wake with
-`gc runtime drain-ack` + `exit` therefore respawns immediately, with no
-cadence between wakes. Boot was shaped that way and hot-looped — ~500 fresh
+`gc runtime drain-ack` + `exit` therefore respawns immediately, with no cadence
+between wakes. Boot was shaped that way and hot-looped — ~500 fresh
 sessions/hr, ~2.4M output tokens in 5h, plus a per-second `bead.updated`
 flood on its own session bead — until it was drained (gci-fed).
 
 The cadence now comes from `orders/boot-patrol-tick.toml`. At each tick the
-order pours one wisp when boot holds none, assigns it to boot, and nudges
-boot. Boot runs the wisp, burns it in `finish`, and calls
-`gc runtime request-restart`; the restarted session finds no assigned work and
-ends its turn idle until the next tick. **Boot never pours its own wisp.**
+order pours one wisp when boot holds none and assigns it without nudging.
+The controller fresh-cycles the session, whose startup nudge begins the patrol.
+Boot burns the wisp in `finish` and ends its turn; the session idles with its
+old context and makes no requests until the next tick assigns a new wisp and
+triggers another fresh session. An already-held wisp is nudged.
+**Boot never pours its own wisp.**
 Self-pouring is what broke the previous shape: pouring and assigning a
 successor before burning the current wisp changed boot's assigned work every
 cycle, so the controller fresh-cycled the `wake_mode = "fresh"` session every
 cycle and `idle_timeout` never fired. The trace showed three
 `fresh_cycle`/`restart` transitions back-to-back, 79-111s apart. The
-order-paced shape keeps one restart per tick, not one per wisp.
+order-paced shape creates one fresh patrol session per tick.
 
 **Do not re-introduce `gc runtime drain-ack` or `exit` into this loop.**
 
@@ -155,14 +157,14 @@ that burns this wisp."""
 
 [[steps]]
 id = "finish"
-title = "Burn this wisp and request a restart"
+title = "Burn this wisp and end the turn"
 needs = ["check-deacon"]
 description = """
-End of watchdog cycle. Burn this wisp, then request a restart. Do NOT pour a
+End of watchdog cycle. Burn this wisp, then end the turn. Do NOT pour a
 next wisp: the `boot-patrol-tick` order owns the cadence and pours and
 assigns the next one at its tick.
 
-**1. Resolve this wisp:**
+**1. Resolve and burn this wisp in one script:**
 
 ```bash
 # Resolve the wisp you are working before touching anything else. gc does not
@@ -175,35 +177,33 @@ assigns the next one at its tick.
 # observation query carries it.
 CURRENT_WISP=${GC_BEAD_ID:-}
 if [ -z "$CURRENT_WISP" ]; then
-  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --include-infra --limit=1 --json | jq -r '.[0].id // empty')
+  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=open,in_progress --type=molecule --include-infra --limit=1 --json | jq -r '.[0].id // empty')
 fi
-```
-
-**2. Burn it:**
-
-Burn the resolved `$CURRENT_WISP`, never a bare `$GC_BEAD_ID`: unset, the
-latter expands to an empty burn target, which reclaims nothing and silently
-leaves this wisp behind every cycle.
-
-```bash
 if [ -n "$CURRENT_WISP" ]; then
-  gc bd mol burn "$CURRENT_WISP" --force
+  if gc bd mol burn "$CURRENT_WISP" --force; then
+    echo "Patrol cycle done: burned $CURRENT_WISP; ending turn until the next tick."
+  else
+    gc runtime request-restart
+  fi
 else
   echo "Could not resolve current boot wisp; not burning."
+  gc runtime request-restart
 fi
 ```
 
-**3. Request a restart:**
+Burn the resolved `$CURRENT_WISP`, never a bare `$GC_BEAD_ID`: unset, the
+latter expands to an empty burn target and leaves the wisp behind.
 
-```bash
-gc runtime request-restart
-```
+**2. End the turn:**
 
-This blocks until the controller restarts you. The new session wakes with no
-assigned wisp, ends its turn idle, and waits for the next order tick.
+After a successful burn, end the turn. This session idles with its old context
+and makes no requests until the next tick assigns a new wisp and the controller
+fresh-cycles it. If the burn fails or the wisp cannot be resolved, the restart
+request blocks until the controller restarts the session, which can adopt the
+still-assigned wisp.
 
 Do NOT pour a next wisp, do NOT call `gc runtime drain-ack`, and do NOT
 `exit`: the order owns the cadence, and a self-poured successor restarts the
 fresh-cycle loop this design exists to stop.
 
-**Exit criteria:** This wisp burned, restart requested, no successor poured."""
+**Exit criteria:** This wisp burned and turn ended, or restart requested on failure; no successor poured."""

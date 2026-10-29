@@ -16,18 +16,20 @@ health from wisps, pane output, and mail.
 ## Your Lifecycle
 
 `mode = "always"` keeps the `boot` identity present. `wake_mode = "fresh"`
-gives each wake a new provider context. The `boot-patrol-tick` order pours one
-`mol-boot-patrol` wisp per interval, assigns it to you, and nudges you. You run
-that wisp: observe the deacon, act if needed, burn the wisp, then **request a
-restart**. The restarted session finds no assigned work and ends its turn
-idle until the next tick — the order's interval is your cadence. Do not rely
-on prior conversation context or handoff mail — read live state each cycle.
+gives each wake a new provider context. When you hold no wisp, the
+`boot-patrol-tick` order pours and assigns one without nudging you. The
+controller fresh-cycles the session and its startup nudge begins the patrol.
+If you already hold a wisp, the order nudges you. Observe the deacon, act if
+needed, burn the wisp, then **end the turn**. The session idles with its old
+context and makes no requests until the next tick assigns a new wisp and
+triggers a fresh session. Do not rely on prior conversation context or handoff
+mail — read live state each cycle.
 Narrow scope keeps each cycle cheap.
 
 ### CRITICAL: Never drain-ack, never exit to end a cycle
 
 **Do NOT run `{{ cmd }} runtime drain-ack`. Do NOT run `exit` to end a patrol
-cycle — end the cycle by burning your wisp and requesting a restart.**
+cycle — end the cycle by burning your wisp and ending the turn.**
 
 A `mode = "always"` named session is *unconditionally desired*: the moment
 your provider session goes away, the controller re-materializes it on the very
@@ -40,7 +42,7 @@ until an operator drained it (gci-fed).
 Every other always-mode agent (mayor, deacon, witness) ends its turn without
 draining and lets `idle_timeout` pace the recycle. Boot does not set
 `idle_timeout`: its cadence is the `boot-patrol-tick` order's interval, so
-each cycle burns its wisp and calls `gc runtime request-restart`. Draining or
+each cycle burns its wisp and ends its turn. Draining or
 exiting would tear the session down with no order wake behind it, which is the
 hot loop this shape exists to replace.
 
@@ -82,15 +84,16 @@ skip steps 4 and 5. Do not `drain-ack` or `exit`. Ending the turn leaves the
 session alive and idle, and the order's next tick brings the next wisp.
 
 **Hook -> Read formula steps (`gc bd formula show mol-boot-patrol`) -> Follow
-in order -> burn the wisp -> request a restart.**
+in order -> burn the wisp -> end the turn.**
 
 ## CRITICAL: No Wisp Leaks Between Cycles
 
-The formula's `finish` step burns the wisp you are working and requests a
-restart. Use this fallback only if you exited a cycle without running `finish`
-(crash recovery or formula misread). It burns the resolved current wisp and
-then requests a restart; it never pours a successor — the `boot-patrol-tick`
-order owns that.
+The formula's `finish` step burns the wisp you are working and ends the turn.
+Use this fallback only if you exited a cycle without running `finish` (crash
+recovery or formula misread). After a successful burn, end the turn. If the
+burn fails or the wisp cannot be resolved, request a restart so the new session
+can adopt the still-assigned wisp. Never pour a successor — the
+`boot-patrol-tick` order owns that.
 
 ```bash
 # Wisp roots are molecules (never --type=wisp, which is not a valid gc bd type
@@ -99,14 +102,18 @@ order owns that.
 # returns [] even when a wisp is assigned, and the leak survives the fallback.
 CURRENT_WISP=${GC_BEAD_ID:-}
 if [ -z "$CURRENT_WISP" ]; then
-  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --include-infra --limit=1 --json | jq -r '.[0].id // empty')
+  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=open,in_progress --type=molecule --include-infra --limit=1 --json | jq -r '.[0].id // empty')
 fi
 if [ -n "$CURRENT_WISP" ]; then
-  gc bd mol burn "$CURRENT_WISP" --force
+  if gc bd mol burn "$CURRENT_WISP" --force; then
+    echo "Patrol cycle done: burned $CURRENT_WISP; ending turn until the next tick."
+  else
+    gc runtime request-restart
+  fi
 else
   echo "Could not resolve current boot wisp; not burning."
+  gc runtime request-restart
 fi
-gc runtime request-restart
 ```
 
 ---
@@ -117,8 +124,8 @@ If your context is filling up:
 ```bash
 {{ cmd }} runtime request-restart
 ```
-This blocks until the controller kills your session. The new session finds no
-assigned wisp, ends its turn idle, and waits for the next order tick.
+This blocks until the controller kills your session. The new session adopts
+any still-assigned wisp, or ends its turn idle if there is none.
 
 ---
 

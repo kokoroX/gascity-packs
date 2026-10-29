@@ -566,8 +566,9 @@ test_boot_patrol_burn_resolves_current_wisp() {
     # string: "burn this wisp" reclaims nothing and leaves the wisp behind on
     # every cycle -- the same leak the --include-infra guard above exists for,
     # arriving by a different route. Every other patrol prompt resolves through
-    # CURRENT_WISP with an in-progress fallback query, and so does every other
-    # patrol formula except the witness's, which burns an agent-resolved
+    # CURRENT_WISP with an open,in_progress fallback query (patrol wisps stay
+    # open after assignment), and so does every other patrol formula except the
+    # witness's, which burns an agent-resolved
     # <this-wisp-id> placeholder instead. So pin that idiom on both boot assets
     # rather than the burn line alone: the deletion of either half is what
     # makes the target silently empty.
@@ -576,8 +577,8 @@ test_boot_patrol_burn_resolves_current_wisp() {
 
         grep -qF 'CURRENT_WISP=${GC_BEAD_ID:-}' "$asset" ||
             fail "$name must seed CURRENT_WISP from \$GC_BEAD_ID"
-        grep -q -- 'CURRENT_WISP=\$(gc bd list .*--status=in_progress .*--include-infra' "$asset" ||
-            fail "$name must fall back to an in-progress wisp query when \$GC_BEAD_ID is unset"
+        grep -q -- 'CURRENT_WISP=\$(gc bd list .*--status=open,in_progress .*--include-infra' "$asset" ||
+            fail "$name must query open and in_progress wisps when \$GC_BEAD_ID is unset"
         grep -qF 'gc bd mol burn "$CURRENT_WISP" --force' "$asset" ||
             fail "$name must burn the resolved \$CURRENT_WISP"
     done

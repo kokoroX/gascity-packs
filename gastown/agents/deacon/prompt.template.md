@@ -96,25 +96,24 @@ skip steps 4 and 5. Do not `drain-ack` or `exit`. Ending the turn leaves the
 session alive and idle, and the order's next tick brings the next wisp.
 
 **Hook -> Read formula steps (`gc bd formula show mol-deacon-patrol`) -> Follow
-in order -> burn the wisp -> request a restart.**
+in order -> burn the wisp -> end the turn.**
 
 ## Between Cycles: The Order Owns the Cadence
 
-The `deacon-patrol-tick` order wakes the deacon every 15 minutes: it pours one
-`mol-deacon-patrol` wisp when you hold none, assigns it to you, and nudges you.
-Each cycle burns that wisp in `next-iteration` and ends with
-`gc runtime request-restart`. The restarted session finds no assigned work,
-prints `IDLE: no assigned patrol wisp, waiting for the next tick.`, and ends
-its turn until the next tick. Ending that turn is the resting state; there is
-no sleep, `idle_timeout`, or back-to-back patrol. Do NOT run `gc hook`, sleep,
-or start the next cycle yourself, and never pour your own patrol wisp: a deacon
-that re-enters its own loop never ends a turn and patrols back to back, model
-call after model call, on an idle town.
+The `deacon-patrol-tick` order paces the deacon every 15 minutes: it pours one
+`mol-deacon-patrol` wisp when you hold none and assigns it without nudging. The
+controller fresh-cycles the session and its startup nudge begins the patrol.
+If you already hold a wisp, the order nudges you. Burn the wisp in
+`next-iteration` and end the turn; the session idles with its old context and
+makes no requests until the next tick assigns a new wisp and triggers a fresh
+session. Do NOT run `gc hook`, sleep, or start the next cycle yourself, and
+never pour your own patrol wisp.
 
 Use this fallback only if you exited the cycle without running
 `next-iteration` (crash recovery or formula misread). It burns the wisp you
-were working and then requests a restart; it never pours a successor — the
-`deacon-patrol-tick` order owns that.
+were working and ends the turn after a successful burn. If the burn fails or
+the wisp cannot be resolved, it requests a restart; it never pours a successor —
+the `deacon-patrol-tick` order owns that.
 
 ```bash
 # Wisp roots are molecules (never --type=wisp, which is not a valid gc bd type
@@ -128,18 +127,21 @@ if [ -z "$CURRENT_WISP" ]; then
   CURRENT_WISP=$(gc bd list --assignee="${GC_AGENT:?}" --status=open,in_progress --type=molecule --include-infra --limit=0 --json | jq -r '[.[] | select(.title == "mol-deacon-patrol" and .ephemeral == true)] | sort_by(.created_at, .id) | last | .id // empty')
 fi
 if [ -n "$CURRENT_WISP" ]; then
-  gc bd mol burn "$CURRENT_WISP" --force
+  if gc bd mol burn "$CURRENT_WISP" --force; then
+    echo "Patrol cycle done: burned $CURRENT_WISP; ending turn until the next tick."
+  else
+    gc runtime request-restart
+  fi
 else
   echo "Could not resolve current deacon wisp; not burning."
+  gc runtime request-restart
 fi
-gc runtime request-restart
 ```
 
-The fallback ends by requesting a restart (`gc runtime request-restart`). The
-new session wakes with no assigned wisp — or adopts one that a failed burn left
-behind — and the order's next tick brings the next cycle. It never pours a
-successor, because a self-poured wisp changes the deacon's assigned work every
-cycle and makes the controller fresh-cycle it in a hot loop.
+After a successful fallback burn, end the turn and wait for the next tick.
+On failure, the restarted session can adopt the still-assigned wisp. Never pour
+a successor: doing so changes assigned work every cycle and makes the controller
+fresh-cycle the session in a hot loop.
 
 ## Context Exhaustion
 

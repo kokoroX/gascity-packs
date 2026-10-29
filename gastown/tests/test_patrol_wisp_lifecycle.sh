@@ -21,8 +21,8 @@ set -euo pipefail
 #
 # The deacon's cadence is now owned by the `deacon-patrol-tick` order, so its
 # loop has one more property pinned here: a rotation burns the current wisp and
-# ends with `gc runtime request-restart`, never pouring a successor and never
-# draining. A self-poured successor changes the fresh session's assigned work
+# ends the turn, requesting a restart only on failure, never pouring a successor
+# and never draining. A self-poured successor changes the fresh session's assigned work
 # every cycle, which is the hot loop this design exists to stop. Startup adopts
 # the wisp the order assigned and prints IDLE when there is none; an empty hand
 # is the gap between ticks, not a license to self-pour. And an empty GC_AGENT
@@ -447,11 +447,11 @@ rotate_legs() {
 }
 
 # ---------------------------------------------------------------------------
-# Legs for a deacon rotate region (resolve -> burn -> request restart).
+# Legs for a deacon rotate region (resolve -> burn -> end turn or restart).
 #
 # The `deacon-patrol-tick` order owns the deacon's cadence, so a rotation never
-# pours and never drains: it burns the wisp it was working and ends with
-# `gc runtime request-restart`. A self-poured successor would change the fresh
+# pours and never drains: it burns the wisp and ends the turn, requesting a
+# restart on failure. A self-poured successor would change the fresh
 # session's assigned work every cycle; a drain would restart without the wisp
 # being burned. Either one restores the hot loop this design exists to stop.
 # ---------------------------------------------------------------------------
@@ -472,14 +472,22 @@ deacon_rotate_legs() {
     [ ! -s "$STATE" ] || fail "$label: a wisp-owning cycle must not pour a successor: $(cat "$STATE")"
     [ "$(count_calls 'gc bd mol wisp')" -eq 0 ] || fail "$label: poured a successor; the order owns the pour"
     drained && fail "$label: a successful rotation must not drain the session"
-    restart_requested || fail "$label: a successful rotation must end by requesting a restart (last gc call: $(tail -n 1 "$GC_LOG"))"
+    ! grep -q '^gc runtime request-restart$' "$GC_LOG" || fail "$label: a successful burn must end the turn without a restart"
+    grep -F -q 'Patrol cycle done: burned w-cur; ending turn until the next tick.' "$LAST_OUT" || fail "$label: successful burn must report the end of the turn"
+
+    seed_state "w-cur $FORMULA open $AGENT true 1"
+    run_region "$region" STUB_BURN_FAIL=1
+    has_id w-cur || fail "$label: a failed burn must leave the wisp assigned"
+    restart_requested || fail "$label: a failed burn must request a restart"
+    drained && fail "$label: a failed burn must not drain"
+    [ "$(count_calls 'gc bd mol wisp')" -eq 0 ] || fail "$label: a failed burn must not pour"
 
     # Status half, other side: an in_progress wisp is the current wisp too.
     seed_state "w-cur $FORMULA in_progress $AGENT true 1"
     run_region "$region"
     [ "$RC" -eq 0 ] || fail "$label: burning an in_progress current wisp must succeed (rc=$RC)"
     has_id w-cur && fail "$label: an in_progress current wisp was not burned"
-    restart_requested || fail "$label: an in_progress rotation must request a restart"
+    ! grep -q '^gc runtime request-restart$' "$GC_LOG" || fail "$label: an in_progress burn must end the turn"
 
     # No assigned wisp: burn nothing, pour nothing, and still request a restart.
     seed_state
@@ -503,7 +511,7 @@ deacon_rotate_legs() {
     [ "$RC" -eq 0 ] || fail "$label: burning the GC_BEAD_ID wisp must succeed (rc=$RC)"
     has_id w-old && fail "$label: GC_BEAD_ID named the current wisp but it was not burned"
     has_id w-cur || fail "$label: burned a wisp GC_BEAD_ID did not name"
-    restart_requested || fail "$label: a named rotation must request a restart"
+    ! grep -q '^gc runtime request-restart$' "$GC_LOG" || fail "$label: a named burn must end the turn"
 
     # An empty identity reaches no lookup: an empty --assignee is no filter.
     seed_state "w-mine $FORMULA open $AGENT true 1" "w-theirs $FORMULA open other-city/agent true 2"
@@ -518,7 +526,7 @@ deacon_rotate_legs() {
     run_region "$region"
     [ "$RC" -eq 0 ] || fail "$label: rotating among duplicates must succeed (rc=$RC)"
     has_id w-new && fail "$label: the newest patrol wisp must be the one resolved and burned"
-    restart_requested || fail "$label: a duplicate rotation must request a restart"
+    ! grep -q '^gc runtime request-restart$' "$GC_LOG" || fail "$label: a duplicate burn must end the turn"
     return 0
 }
 
@@ -740,7 +748,7 @@ write_gc_stub
 # The last arguments are the failure contract. The refinery's rotations drain on
 # failure; its prompt's two rules are the formula's blocks restated for the
 # agent and stop without draining. The deacon's rotations never pour, never
-# drain, and always end by requesting a restart; its startup adopts what the
+# drain, and request a restart only on failure; its startup adopts what the
 # `deacon-patrol-tick` order assigned and prints IDLE on an empty hand.
 for GC_APPENDS_INFRA in 0 1; do
     tier=$([ "$GC_APPENDS_INFRA" = 1 ] && echo "gc appends --include-infra" || echo "bd tier rule")

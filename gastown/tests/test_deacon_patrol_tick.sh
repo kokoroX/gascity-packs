@@ -167,9 +167,8 @@ test_empty_hand_pours_assigns_and_nudges() {
         fail "the pour must carry the binding prefix as a var: $(cat "$CALLS")"
     grep -F 'bd update wi-new --assignee=gastown.deacon' "$CALLS" >/dev/null ||
         fail "the poured wisp must be assigned to the deacon agent name: $(cat "$CALLS")"
-    [ "$(grep -c '^session nudge' "$CALLS")" -eq 1 ] ||
-        fail "a fresh pour must produce exactly one nudge: $(cat "$CALLS")"
-    assert_nudge_shape
+    ! grep -q '^session nudge' "$CALLS" ||
+        fail "a fresh pour must not nudge the old session: $(cat "$CALLS")"
     ! grep -q '^bd mol burn' "$CALLS" ||
         fail "a successful pour must not burn anything: $(cat "$CALLS")"
 }
