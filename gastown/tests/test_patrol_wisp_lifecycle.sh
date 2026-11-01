@@ -220,6 +220,7 @@ else:
 
 subs = {
     "{{target_branch}}": "main", "{{rig_name}}": "testrig", "{{binding_prefix}}": "",
+    "{{default_merge_strategy}}": "direct",
     "{{ .DefaultBranch }}": "main", "{{ .RigName }}": "testrig", "{{ .BindingPrefix }}": "",
 }
 
@@ -316,7 +317,7 @@ run_region() {
         cd "$tmp" || exit 99
         env -u GC_BEAD_ID -u GC_TRIGGER_WORK_BEAD_ID \
             PATH="$BIN:$PATH" GC_LOG="$GC_LOG" STATE="$STATE" SEQ="$SEQ" \
-            STUB_GC_APPENDS_INFRA="$GC_APPENDS_INFRA" GC_AGENT="$AGENT" "$@" \
+            STUB_GC_APPENDS_INFRA="$GC_APPENDS_INFRA" GC_AGENT="$AGENT" DEFAULT_MERGE_STRATEGY=mirror-pr "$@" \
             bash -c 'set +eu; . "$1"' bash "$script"
     ) >"$LAST_OUT" 2>&1 || RC=$?
 }

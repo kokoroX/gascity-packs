@@ -35,7 +35,8 @@ The recipe must read warrant metadata from the claimed bead via
 
 ## Merge strategies
 
-Work beads default to `metadata.merge_strategy=direct`: refinery lands the
+The `default_merge_strategy` formula variable defaults to `direct`; an explicit
+`metadata.merge_strategy` on a work bead takes precedence. In direct mode refinery lands the
 branch on the target and closes the bead after verifying the remote target.
 With `mr` / `pr`, refinery publishes a GitHub pull request and records a
 pending handoff. The source bead stays `blocked` until
@@ -63,6 +64,17 @@ invoked by the MR publication path. Because blocked beads are not session
 demand, the witness patrol wakes the refinery whenever a pending PR check is
 due, so a merged PR releases its dependents even when no other merge work
 arrives.
+
+With `mirror-pr`, refinery pushes the tested commit without force to the local
+mirror's `gc-pr/<target>/<work>` branch and blocks the bead. The host mirror
+synchronizer publishes the PR and writes `gc-pr-state/<work>.json` inside the
+bare origin. `gc gastown mirror-pr-reconcile` checks one pending handoff per
+work scan, verifies the recorded head and the merge commit's ancestry on the
+freshly fetched target, then closes the bead and deletes the mirror branch.
+Missing, open, invalid or unreadable state never closes the bead; a closed PR
+is routed to a human. The refinery needs no GitHub credentials for this mode.
+The task artifact is retained. Ensure the refinery is periodically awakened
+while mirror PRs are pending; blocked beads alone do not create session demand.
 
 This contract applies to new handoffs. An upgrade does not reopen legacy beads
 that an older pack already closed at PR publication; operators should audit
