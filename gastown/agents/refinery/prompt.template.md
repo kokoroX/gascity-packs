@@ -73,6 +73,12 @@ for its whole life (assigning it does not claim it), so the lookup covers
 `open,in_progress` and the wisps tier (`--include-infra`). Pouring before that
 check is how every cycle used to leak one wisp.
 
+Before running either successor-pour example, set `DEFAULT_MERGE_STRATEGY` to
+this wisp's rendered `default_merge_strategy` value shown in its `merge-push`
+step. Do not substitute `direct` merely because the bead has no strategy: the
+wisp may have been configured with `mirror-pr`. If the value cannot be
+resolved, stop without pouring or burning the current wisp.
+
 ```bash
 CURRENT_WISP=${GC_BEAD_ID:-}
 if [ -z "$CURRENT_WISP" ]; then
@@ -82,7 +88,7 @@ if [ -z "$CURRENT_WISP" ]; then
   echo "Could not resolve the current refinery wisp; not pouring a successor."
   exit 1
 fi
-NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')
+NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --var default_merge_strategy="${DEFAULT_MERGE_STRATEGY:?Set from the current wisp or rig configuration}" --json | jq -r '.new_epic_id // empty')
 if [ -z "$NEXT" ]; then
   echo "Could not pour next refinery wisp; not burning."
   exit 1
@@ -128,7 +134,7 @@ if [ -z "$CURRENT_WISP" ]; then
   echo "Could not resolve the current refinery wisp; not pouring a successor or requesting restart."
   exit 1
 fi
-NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')
+NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --var default_merge_strategy="${DEFAULT_MERGE_STRATEGY:?Set from the current wisp or rig configuration}" --json | jq -r '.new_epic_id // empty')
 if [ -z "$NEXT" ]; then
   echo "Could not pour next refinery wisp; not requesting restart."
   exit 1
@@ -212,8 +218,10 @@ for EXTRA in $(printf '%s\n' $PATROL_WISPS | sed '1d'); do  # burn the leaked su
 done
 
 # Step 2: No patrol wisp at all? Pour exactly one (root-only — no child step beads) and assign it
+# Set DEFAULT_MERGE_STRATEGY from the rig's chosen formula configuration first;
+# use direct if no default was configured. Never guess when configuration is unknown.
 if [ -z "$WISP" ]; then
-  WISP=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')
+  WISP=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --var default_merge_strategy="${DEFAULT_MERGE_STRATEGY:?Set from the current wisp or rig configuration}" --json | jq -r '.new_epic_id // empty')
   if [ -z "$WISP" ]; then
     echo "Could not pour a refinery patrol wisp; draining."
     gc runtime drain-ack
@@ -274,14 +282,14 @@ ancestry probe decides which case you are in.**
 Polecats set these metadata fields before assigning a work bead to you:
 - `branch` — source branch name (REQUIRED)
 - `target` — target branch (optional, defaults to {{ .DefaultBranch }})
-- `merge_strategy` — handoff mode (optional, defaults to `direct`)
+- `merge_strategy` — handoff mode (optional, defaults to the wisp's `default_merge_strategy`, normally `direct`)
 - `existing_pr` — existing PR URL to reuse in `mr` / `pr` mode
 
 Read them mechanically:
 ```bash
 gc bd show $WORK --json | jq -r '.[0].metadata.branch'
 gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{ .DefaultBranch }}"'
-gc bd show $WORK --json | jq -r '.[0].metadata.merge_strategy // "direct"'
+gc bd show $WORK --json | jq -r '.[0].metadata.merge_strategy // empty' # if empty, use the current wisp's default_merge_strategy
 gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty'
 ```
 
@@ -323,6 +331,12 @@ contradictory record on the bead.
 
 - `direct` — merge to target and push normally
 - `mr` / `pr` — push the rebased source branch and create or update a GitHub PR
+- `mirror-pr` — push the tested commit to `gc-pr/<target>/<work>` on the local mirror; the host creates the PR. The bead stays blocked until `gc gastown mirror-pr-reconcile` verifies the host's state and the merge on the target, then closes the bead and deletes the mirror branch.
+
+The formula variable `default_merge_strategy` defaults to `direct`; an explicit
+work-bead strategy wins. Preserve the current wisp's value when pouring a
+successor. Run `gc gastown mirror-pr-reconcile` alongside PR reconciliation
+before each work scan. This mode does not require GitHub access in the refinery.
 
 In `mr` mode, PR creation is a pending handoff, not completion. Record the
 canonical PR identity and validated head with
@@ -363,8 +377,8 @@ not yet supported: `metadata.existing_pr` suppresses the `gh pr create`
 call, but the validation step above (`gh pr view`) is also
 GitHub-only — it cannot resolve a non-GitHub PR, so a refinery on a
 non-GitHub rig will correctly fail validation and escalate to mayor
-rather than close, even for a perfectly valid PR. There is no working
-non-GitHub path today. Native support is tracked upstream:
+rather than close, even for a perfectly valid PR. The separate `mirror-pr` strategy delegates GitHub access to the mirror host.
+Native non-GitHub PR support is tracked upstream:
 gascity#5260.
 
 If `metadata.existing_pr` is present while `merge_strategy` is unset or
@@ -404,7 +418,7 @@ alert the witness, not `gc mail send`.
 
 | Want to... | Correct command |
 |------------|----------------|
-| Pour next wisp | `NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json \| jq -r '.new_epic_id // empty')` |
+| Pour next wisp | `NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --var default_merge_strategy="${DEFAULT_MERGE_STRATEGY:?Set from the current wisp or rig configuration}" --json \| jq -r '.new_epic_id // empty')` |
 | Burn current wisp | Follow Patrol Lifecycle Discipline Rule 1: resolve `$CURRENT_WISP` first (pour nothing if you cannot), pour next wisp, validate `NEXT`, assign it to `$GC_AGENT`, then burn `$CURRENT_WISP`. Never run a standalone burn. |
 | Find assigned work | `gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee="$GC_AGENT" --status=open,in_progress` — both statuses, comma-separated: a bead you already claimed is in_progress, and a query filtered to open alone can never see it again |
 | Reconcile pending PR | `gc gastown pr-merge-reconcile` |

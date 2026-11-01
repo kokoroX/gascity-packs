@@ -1,7 +1,7 @@
 description = """
 Refinery patrol loop. Poured as a root-only wisp on startup:
 
-  WISP=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')
+  WISP=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --var default_merge_strategy={{default_merge_strategy}} --json | jq -r '.new_epic_id // empty')
   gc bd update $WISP --assignee=$GC_AGENT --status=in_progress
 
 `--json` prints one multi-line object on stdout and gc writes config
@@ -86,6 +86,10 @@ default = ""
 description = "Default target branch for merges"
 default = "main"
 
+[vars.default_merge_strategy]
+description = "Default merge strategy when work bead metadata does not specify one"
+default = "direct"
+
 [vars.delete_merged_branches]
 description = "Deprecated compatibility setting; successful artifact handoffs retain source branches for recovery"
 default = "true"
@@ -146,7 +150,7 @@ if [ -z "$CURRENT_WISP" ]; then
   gc runtime drain-ack
   exit 1
 fi
-NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')
+NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --var default_merge_strategy={{default_merge_strategy}} --json | jq -r '.new_epic_id // empty')
 if [ -z "$NEXT" ]; then
   echo "Could not pour next refinery wisp; not requesting restart."
   gc runtime drain-ack
@@ -202,6 +206,9 @@ reconcile the least-recently-checked `merge_strategy=mr` handoff in this rig:
 ```bash
 if ! gc gastown pr-merge-reconcile; then
   echo "Pending PR reconciliation failed safely; its work bead remains blocked."
+fi
+if ! gc gastown mirror-pr-reconcile; then
+  echo "Pending mirror PR reconciliation failed safely; its work bead remains blocked or awaits cleanup."
 fi
 ```
 
@@ -411,7 +418,7 @@ Target: $TARGET"
     gc runtime drain-ack
     exit 1
   fi
-  NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')
+  NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --var default_merge_strategy={{default_merge_strategy}} --json | jq -r '.new_epic_id // empty')
   if [ -z "$NEXT" ]; then
     echo "Could not pour next refinery wisp; not burning."
     gc runtime drain-ack
@@ -528,7 +535,7 @@ if [ -z "$CURRENT_WISP" ]; then
   gc runtime drain-ack
   exit 1
 fi
-NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')
+NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --var default_merge_strategy={{default_merge_strategy}} --json | jq -r '.new_epic_id // empty')
 if [ -z "$NEXT" ]; then
   echo "Could not pour next refinery wisp; not burning."
   gc runtime drain-ack
@@ -634,7 +641,7 @@ TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_bran
        gc runtime drain-ack
        exit 1
      fi
-     NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')
+     NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --var default_merge_strategy={{default_merge_strategy}} --json | jq -r '.new_epic_id // empty')
      if [ -z "$NEXT" ]; then
        echo "Could not pour next refinery wisp; not burning."
        gc runtime drain-ack
@@ -673,6 +680,7 @@ title = "Merge and push"
 needs = ["handle-failures"]
 description = """
 **Config: target_branch = {{target_branch}}**
+**Config: default_merge_strategy = {{default_merge_strategy}}**
 **Config (deprecated; no effect on successful handoffs):
 delete_merged_branches = {{delete_merged_branches}}**
 
@@ -680,15 +688,23 @@ Read the merge target and merge strategy from the work bead metadata:
 ```bash
 BRANCH=$(gc bd show $WORK --json | jq -r '.[0].metadata.branch')
 TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_branch}}"')
-MERGE_STRATEGY=$(gc bd show $WORK --json | jq -r '.[0].metadata.merge_strategy // "direct"')
+MERGE_STRATEGY=$(gc bd show $WORK --json | jq -r '.[0].metadata.merge_strategy // "{{default_merge_strategy}}"')
 EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')
+if [ "$MERGE_STRATEGY" = "pr" ]; then
+  MERGE_STRATEGY="mr"
+fi
+if [ -n "$EXISTING_PR" ] && [ "$MERGE_STRATEGY" = "direct" ]; then
+  echo "metadata.existing_pr requires pull-request handoff; using merge_strategy=mr."
+  MERGE_STRATEGY="mr"
+fi
+ORIGIN_REPO=""
 ORIGIN_REPO_ERROR=""
-if command -v gh >/dev/null 2>&1; then
+if [ "$MERGE_STRATEGY" != "mirror-pr" ] && command -v gh >/dev/null 2>&1; then
   if ! ORIGIN_REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>&1); then
     ORIGIN_REPO_ERROR="gh repo view failed while resolving origin repository: $ORIGIN_REPO"
     ORIGIN_REPO=""
   fi
-else
+elif [ "$MERGE_STRATEGY" != "mirror-pr" ]; then
   ORIGIN_URL=$(git remote get-url origin)
   case "$ORIGIN_URL" in
     git@github.com:*|https://github.com/*)
@@ -699,13 +715,6 @@ else
       ORIGIN_REPO_ERROR="GitHub REST fallback supports only github.com origin remotes; install gh for $ORIGIN_URL."
       ;;
   esac
-fi
-if [ "$MERGE_STRATEGY" = "pr" ]; then
-  MERGE_STRATEGY="mr"
-fi
-if [ -n "$EXISTING_PR" ] && [ "$MERGE_STRATEGY" = "direct" ]; then
-  echo "metadata.existing_pr requires pull-request handoff; using merge_strategy=mr."
-  MERGE_STRATEGY="mr"
 fi
 
 block_existing_pr() {
@@ -731,7 +740,7 @@ Target: $TARGET"
     gc runtime drain-ack
     exit 1
   fi
-  NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')
+  NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --var default_merge_strategy={{default_merge_strategy}} --json | jq -r '.new_epic_id // empty')
   if [ -z "$NEXT" ]; then
     echo "Could not pour next refinery wisp; not burning."
     gc runtime drain-ack
@@ -1107,6 +1116,54 @@ Run **Successful task-artifact cleanup** below, then leave
 recovery copy after local artifact cleanup. `delete_merged_branches` is retained
 only for formula compatibility and MUST NOT delete a successfully handed-off
 artifact source branch.
+
+**If MERGE_STRATEGY = "mirror-pr":**
+
+After the same rebase and quality gates, verify a real change, refresh the
+remote target, and prove it is an ancestor of the tested `temp` commit. Push
+that commit only to `gc-pr/<target>/<work>`, without force. The mirror host
+creates and tracks the PR; do not call `gh` or push the integration branch.
+
+```bash
+branch_has_real_change "origin/$TARGET" temp
+BHRC_STATUS=$?
+case "$BHRC_STATUS" in
+  0) : ;;
+  1) halt_false_completion "$BRANCH" "$(git merge-base "origin/$TARGET" temp 2>/dev/null || printf '%s' "origin/$TARGET")" ;;
+  *) echo "Cannot check the tested branch. STOP."; gc runtime drain-ack; exit 1 ;;
+esac
+case "$WORK" in
+  ''|.|..|*[!A-Za-z0-9._-]*) echo "Invalid work bead ID. STOP."; gc runtime drain-ack; exit 1 ;;
+esac
+MIRROR_BRANCH="gc-pr/$TARGET/$WORK"
+if ! git check-ref-format "refs/heads/$MIRROR_BRANCH" || \
+   ! git fetch --no-tags origin "+refs/heads/$TARGET:refs/remotes/origin/$TARGET" || \
+   ! GIT_GRAFT_FILE=/dev/null git --no-replace-objects merge-base --is-ancestor "refs/remotes/origin/$TARGET" temp; then
+  echo "Cannot prove the tested commit fast-forwards the current target. STOP; repeat rebase and quality gates."
+  gc runtime drain-ack
+  exit 1
+fi
+MIRROR_HEAD=$(git rev-parse 'temp^{commit}') || { gc runtime drain-ack; exit 1; }
+if ! git push origin "$MIRROR_HEAD:refs/heads/$MIRROR_BRANCH"; then
+  REASON="Could not fast-forward $MIRROR_BRANCH to $MIRROR_HEAD. Inspect origin and retry manually; do not force push."
+  gc bd update "$WORK" --status=blocked --assignee="" \
+    --set-metadata merge_strategy=mirror-pr --set-metadata merge_result=blocked \
+    --set-metadata gc.routed_to=human --set-metadata blocked_reason="$REASON"
+  gc mail send mayor/ -s "ESCALATION: mirror PR push failed for $WORK" -m "$REASON"
+  gc runtime drain-ack
+  exit 1
+fi
+if ! gc gastown mirror-pr-reconcile record "$WORK" "$TARGET" "$MIRROR_HEAD"; then
+  echo "Mirror branch was pushed but the pending handoff could not be recorded. STOP; retry the handoff."
+  gc runtime drain-ack
+  exit 1
+fi
+git checkout --detach "origin/$TARGET" >/dev/null 2>&1 || true
+git branch -d temp || git branch -D temp || true
+```
+
+The bead and its dependents remain blocked. Reconciliation verifies the host's
+merge evidence before closing; task artifacts remain preserved at handoff.
 
 **If MERGE_STRATEGY = "mr":**
 
@@ -1553,7 +1610,7 @@ if [ -z "$CURRENT_WISP" ]; then
   gc runtime drain-ack
   exit 1
 fi
-NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')
+NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --var default_merge_strategy={{default_merge_strategy}} --json | jq -r '.new_epic_id // empty')
 if [ -z "$NEXT" ]; then
   echo "Could not pour next refinery wisp; not burning."
   gc runtime drain-ack

@@ -765,6 +765,7 @@ test_refinery_rebase_guidance_matches_the_guarded_step() {
 
 test_patrol_wisp_pours_parse_full_json_stdout() {
     local asset line pipeline var id total=0
+    local DEFAULT_MERGE_STRATEGY=mirror-pr
     local wisp_json='{
   "created": 1,
   "id_mapping": {
