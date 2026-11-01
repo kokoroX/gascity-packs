@@ -2,14 +2,18 @@
 
 ```text
 gc gastown mirror-pr-reconcile
+gc gastown mirror-pr-reconcile --all
 gc gastown mirror-pr-reconcile record WORK TARGET HEAD_SHA
 ```
 
 `record` atomically blocks the work bead with its validated head, target,
-`gc-pr/<target>/<work>` branch and a reconciliation marker. With no arguments,
-the command checks at most one least-recently-checked marker in the rig.
-The origin must be a local mirror repository: its `gc-pr-state/<work>.json`
-is written by the host mirror synchronizer.
+`gc-pr/<target>/<work>` branch, local mirror origin and a reconciliation marker.
+With no arguments, the command checks at most one least-recently-checked marker
+for this origin. `--all` checks every matching marker in that order (ties by
+bead ID), continues after failures and exits 1 if any check fails. Reconciliation
+preserves the existing assignee. The origin must be a local mirror repository:
+its `gc-pr-state/<work>.json` is written by the host mirror synchronizer. Older
+markers without an origin are claimed only when that state file exists.
 
 A missing file or open PR leaves the bead blocked. A merged PR closes it only
 when the file's work, branch, target and head match the handoff and the merge

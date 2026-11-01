@@ -2,23 +2,23 @@
 set -eu
 
 usage() {
-    echo 'usage: gc gastown mirror-pr-reconcile [record WORK TARGET HEAD_SHA]' >&2
+    echo 'usage: gc gastown mirror-pr-reconcile [--all | record WORK TARGET HEAD_SHA]' >&2
     exit 2
 }
 
 bd_update() {
     if [ -n "${GC_RIG:-}" ]; then
-        gc bd update --rig="$GC_RIG" "$@"
+        gc bd update --rig="$GC_RIG" "$@" >/dev/null
     else
-        gc bd update "$@"
+        gc bd update "$@" >/dev/null
     fi
 }
 
 bd_close() {
     if [ -n "${GC_RIG:-}" ]; then
-        gc bd close --rig="$GC_RIG" "$@"
+        gc bd close --rig="$GC_RIG" "$@" >/dev/null
     else
-        gc bd close "$@"
+        gc bd close "$@" >/dev/null
     fi
 }
 
@@ -53,9 +53,27 @@ valid_identity() {
 escalate() {
     reason=$1
     if ! gc mail send mayor/ -s "ESCALATION: mirror PR for $work" -m "$reason
-Work bead: $work"; then
+Work bead: $work" >/dev/null; then
         echo 'mirror-pr-reconcile: mayor notification failed' >&2
     fi
+}
+
+normalize_origin() {
+    case "$1" in
+        /*) printf '%s\n' "$1" ;;
+        *://*|*:*|'') return 1 ;;
+        *) root=$(rig_git rev-parse --show-toplevel) || return 1
+           printf '%s/%s\n' "$root" "$1" ;;
+    esac
+}
+
+resolve_origin() {
+    remote_origin=$(rig_git remote get-url origin) || return 1
+    origin=$(normalize_origin "$remote_origin") || {
+        echo 'mirror-pr-reconcile: origin is not a local mirror path' >&2
+        return 1
+    }
+    state_dir=$origin/gc-pr-state
 }
 
 record_handoff() {
@@ -65,6 +83,7 @@ record_handoff() {
         echo 'mirror-pr-reconcile: invalid work, target, or head' >&2
         return 1
     }
+    resolve_origin || return 1
     # The gate, identity and retry marker must be one durable transition.
     bd_update "$work" --status=blocked --assignee="$GC_AGENT" \
         --set-metadata merge_strategy=mirror-pr \
@@ -73,6 +92,7 @@ record_handoff() {
         --set-metadata "target=$target" \
         --set-metadata merge_result=pull_request_pending \
         --set-metadata mirror_pr_reconcile_pending=true \
+        --set-metadata "mirror_pr_origin=$origin" \
         --set-metadata "blocked_reason=Awaiting mirror PR merge" \
         --unset-metadata mirror_pr_last_checked_at \
         --unset-metadata mirror_pr_error \
@@ -84,25 +104,14 @@ record_handoff() {
 
 manual() {
     reason=$1
-    bd_update "$work" --status=blocked --assignee='' \
+    bd_update "$work" --status=blocked \
         --set-metadata gc.routed_to=human \
         --set-metadata "blocked_reason=$reason" \
-        --unset-metadata mirror_pr_reconcile_pending
+        --unset-metadata mirror_pr_reconcile_pending || return 1
     escalate "$reason"
 }
 
 reconcile_one() {
-    if [ -n "${GC_RIG:-}" ]; then
-        pending=$(gc bd list --rig="$GC_RIG" --all --has-metadata-key=mirror_pr_reconcile_pending --limit=0 --json)
-    else
-        pending=$(gc bd list --all --has-metadata-key=mirror_pr_reconcile_pending --limit=0 --json)
-    fi
-    row=$(printf '%s\n' "$pending" | jq -ce '
-        if type != "array" then error("invalid bead list") else
-        [ .[] | select((.metadata.mirror_pr_reconcile_pending // "" | tostring) == "true")
-          | select(.status == "blocked" or .status == "closed") ]
-        | sort_by(.metadata.mirror_pr_last_checked_at // "", .id) | .[0] // null end')
-    [ "$row" != null ] || { echo 'No pending mirror PRs.'; return 0; }
     work=$(printf '%s' "$row" | jq -r '.id // empty')
     status=$(printf '%s' "$row" | jq -r '.status // empty')
     target=$(printf '%s' "$row" | jq -r '.metadata.target // empty')
@@ -111,6 +120,9 @@ reconcile_one() {
     result=$(printf '%s' "$row" | jq -r '.metadata.merge_result // empty')
     strategy=$(printf '%s' "$row" | jq -r '.metadata.merge_strategy // empty')
     [ -n "$work" ] || { echo 'mirror-pr-reconcile: missing work id' >&2; return 1; }
+    if [ "$has_origin" = false ]; then
+        bd_update "$work" --set-metadata "mirror_pr_origin=$origin" || return 1
+    fi
     if ! valid_identity "$work" "$target" "$head" ||
        [ "$branch" != "gc-pr/$target/$work" ] || [ "$strategy" != mirror-pr ]; then
         if [ "$status" = blocked ]; then manual 'Invalid mirror PR identity; inspect the handoff.'; fi
@@ -119,8 +131,9 @@ reconcile_one() {
     if [ "$status" = closed ]; then
         # The verified close landed before deletion (or deletion before marker clear).
         [ "$result" = mirror_pr_merged ] || return 1
-        delete_branch "$branch" "$head"
-        bd_update "$work" --unset-metadata mirror_pr_reconcile_pending --unset-metadata mirror_pr_error
+        delete_branch "$branch" "$head" || return 1
+        bd_update "$work" --unset-metadata mirror_pr_reconcile_pending --unset-metadata mirror_pr_error || return 1
+        echo "CLEANED: $work — mirror branch removed."
         return 0
     fi
     { [ "$result" = pull_request_pending ] || [ "$result" = mirror_pr_merged ]; } || {
@@ -128,15 +141,8 @@ reconcile_one() {
         return 1
     }
     now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-    bd_update "$work" --assignee="$GC_AGENT" --set-metadata "mirror_pr_last_checked_at=$now"
+    bd_update "$work" --set-metadata "mirror_pr_last_checked_at=$now" || return 1
 
-    origin=$(rig_git remote get-url origin) || return 1
-    case "$origin" in
-        /*) state_dir=$origin/gc-pr-state ;;
-        *://*|*:*|'') echo 'mirror-pr-reconcile: origin is not a local mirror path' >&2; return 1 ;;
-        *) root=$(rig_git rev-parse --show-toplevel) || return 1
-           state_dir=$root/$origin/gc-pr-state ;;
-    esac
     state_file=$state_dir/$work.json
     if [ ! -e "$state_file" ] && [ ! -L "$state_file" ]; then
         echo "PENDING: $work — mirror has not produced a state file."
@@ -155,7 +161,7 @@ reconcile_one() {
     url=$(printf '%s' "$state_json" | jq -r 'if (.pr_url | type) == "string" then .pr_url else empty end')
     recorded_url=$(printf '%s' "$row" | jq -r '.metadata.pr_url // empty')
     if [ -n "$url" ] && [ -z "$recorded_url" ]; then
-        bd_update "$work" --set-metadata "pr_url=$url"
+        bd_update "$work" --set-metadata "pr_url=$url" || return 1
     fi
     case "$state" in
         open) echo "PENDING: $work — mirror PR is open." ;;
@@ -179,10 +185,10 @@ reconcile_one() {
                 return 1
             fi
             bd_update "$work" --set-metadata merge_result=mirror_pr_merged \
-                --set-metadata "merged_sha=$merge_sha" --unset-metadata rejection_reason
-            bd_close "$work" --reason "Mirror PR merged to $target at $merge_sha"
-            delete_branch "$branch" "$head"
-            bd_update "$work" --unset-metadata mirror_pr_reconcile_pending --unset-metadata blocked_reason --unset-metadata mirror_pr_error
+                --set-metadata "merged_sha=$merge_sha" --unset-metadata rejection_reason || return 1
+            bd_close "$work" --reason "Mirror PR merged to $target at $merge_sha" || return 1
+            delete_branch "$branch" "$head" || return 1
+            bd_update "$work" --unset-metadata mirror_pr_reconcile_pending --unset-metadata blocked_reason --unset-metadata mirror_pr_error || return 1
             echo "MERGED: closed $work and deleted $branch."
             ;;
     esac
@@ -200,13 +206,56 @@ delete_branch() {
             escalate "Closed mirror PR branch $delete_ref moved; refusing deletion."
             return 1
         fi
-        rig_git push "--force-with-lease=$delete_ref:$delete_head" origin ":$delete_ref"
+        rig_git push "--force-with-lease=$delete_ref:$delete_head" origin ":$delete_ref" >/dev/null
     fi
+}
+
+reconcile() {
+    mode=$1
+    resolve_origin || return 1
+    if [ -n "${GC_RIG:-}" ]; then
+        pending=$(gc bd list --rig="$GC_RIG" --all --has-metadata-key=mirror_pr_reconcile_pending --limit=0 --json) || return 1
+    else
+        pending=$(gc bd list --all --has-metadata-key=mirror_pr_reconcile_pending --limit=0 --json) || return 1
+    fi
+    rows=$(printf '%s\n' "$pending" | jq -c '
+        if type != "array" then error("invalid bead list") else
+        [ .[] | select((.metadata.mirror_pr_reconcile_pending // "" | tostring) == "true")
+          | select(.status == "blocked" or .status == "closed") ]
+        | sort_by(.metadata.mirror_pr_last_checked_at // "", .id) | .[] end') || return 1
+    remaining=$rows
+    found=false
+    failed=0
+    while [ -n "$remaining" ]; do
+        row=${remaining%%'
+'*}
+        if [ "$remaining" = "$row" ]; then remaining=''; else remaining=${remaining#*'
+'}; fi
+        work=$(printf '%s' "$row" | jq -r '.id // empty')
+        has_origin=$(printf '%s' "$row" | jq -r '(.metadata // {}) | has("mirror_pr_origin")')
+        if [ "$has_origin" = true ]; then
+            recorded_origin=$(printf '%s' "$row" | jq -r '.metadata.mirror_pr_origin | if type == "string" then . else "" end')
+            normalized=$(normalize_origin "$recorded_origin") || continue
+            [ "$normalized" = "$origin" ] || continue
+        else
+            valid_work "$work" || continue
+            [ -e "$state_dir/$work.json" ] || [ -L "$state_dir/$work.json" ] || continue
+        fi
+        found=true
+        if ! (reconcile_one); then
+            echo "FAILED: $work — reconciliation failed."
+            failed=1
+        fi
+        [ "$mode" = all ] || break
+    done
+    [ "$found" = true ] || echo 'No pending mirror PRs.'
+    return "$failed"
 }
 
 [ -n "${GC_AGENT:-}" ] || { echo 'mirror-pr-reconcile: GC_AGENT is empty' >&2; exit 2; }
 case "${1:-}" in
-    '') [ "$#" -eq 0 ] || usage; reconcile_one ;;
+    '') [ "$#" -eq 0 ] || usage; reconcile one ;;
+    --all) [ "$#" -eq 1 ] || usage; reconcile all ;;
     record) shift; record_handoff "$@" ;;
     *) usage ;;
 esac
