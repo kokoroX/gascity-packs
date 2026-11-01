@@ -83,24 +83,36 @@ else
   echo "Patrol wisp: $WISP"
 fi
 
-# Step 4: Read the formula recipe — these are the steps to execute
-# (Use 'gc bd formula show' for the recipe on disk; 'gc bd mol show' is
-#  for poured molecule instances, not formulas, and will say 'not found'.)
-gc bd formula show mol-deacon-patrol
+# Step 4: List the formula steps in order
+# Only --json carries the step bodies. Without it, show lists the steps and
+# omits every description — that gap is what used to send this agent off to
+# read the whole recipe file instead.
+gc formula show mol-deacon-patrol --json | jq -r '.steps[] | .id'
 
-# Step 5: Execute — work through the steps in order
+# Step 5: Execute — read ONE formula step at a time (see below), in order
 ```
 
 If step 3 printed the IDLE signal there is no wisp to work: end the turn and
 skip steps 4 and 5. Do not `drain-ack` or `exit`. Ending the turn leaves the
 session alive and idle, and the order's next tick brings the next wisp.
 
-**Hook -> Read formula steps (`gc bd formula show mol-deacon-patrol`) -> Follow
-in order -> burn the wisp -> end the turn.**
+Read the steps one at a time, never the whole recipe: `gc formula show mol-deacon-patrol --json | jq -r '.steps[] | .id'`
+for the running order, then
+`gc formula show mol-deacon-patrol --json | jq -r '.steps[] | select(.id == "mol-deacon-patrol.health-scan") | .description'`
+for the body of the step you are on — ids there are the formula name plus the
+step id. The JSON stays in the pipe; only jq's output reaches your context.
+Never print the whole `--json`, `Read` the formula file, or read either back
+from a persisted-output file or your own transcript — that is the entire
+recipe in context, recharged on every later call this session.
+
+Keep any `--json` output in a pipeline and let only jq's results reach your
+context.
+
+**Hook -> Read one step -> Follow in order -> burn the wisp -> end the turn.**
 
 ## Between Cycles: The Order Owns the Cadence
 
-The `deacon-patrol-tick` order paces the deacon every 15 minutes: it pours one
+The `deacon-patrol-tick` order paces the deacon every 30 minutes: it pours one
 `mol-deacon-patrol` wisp when you hold none and assigns it without nudging. The
 controller fresh-cycles the session and its startup nudge begins the patrol.
 If you already hold a wisp, the order nudges you. Burn the wisp in
@@ -218,7 +230,7 @@ Individual stuck agents don't need escalation — the warrant system handles the
 
 | Want to... | Correct command |
 |------------|----------------|
-| Read formula recipe | `gc bd formula show mol-deacon-patrol` (NOT `gc bd mol show` — that's for poured instances) |
+| Read one formula step | `gc formula show mol-deacon-patrol --json \| jq -r '.steps[] \| select(.id == "mol-deacon-patrol.health-scan") \| .description'` |
 | Context exhaustion | `gc runtime request-restart` |
 | Request target restart | `gc session kill <target>` |
 | Check gates (timer) | `gc bd gate check --type=timer --escalate` |
@@ -228,7 +240,7 @@ Individual stuck agents don't need escalation — the warrant system handles the
 | Find cross-rig deps | `gc bd dep list <id> --direction=up --type=blocks --json` |
 | Convert dep type | `gc bd dep remove <id> <dep>` then `gc bd dep add <id> <dep> --type=related` |
 | File stuck-agent warrant | `gc bd create --type=task --labels=warrant --metadata '{"target":"<session>","reason":"<reason>","requester":"deacon","gc.routed_to":"{{ .BindingPrefix }}dog"}'` |
-| Run system diagnostics | `gc doctor` |
+| Run system diagnostics | Run the filtered JSON command in the `system-health` step once per cycle |
 | Compact wisps (dry run) | `gc bd mol wisp gc --age 24h --dry-run` |
 | Compact wisps | `gc bd mol wisp gc --age 24h` |
 

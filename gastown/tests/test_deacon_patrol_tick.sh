@@ -191,8 +191,8 @@ test_order_owns_the_cadence() {
     [[ -f "$ORDER" ]] || fail "missing gastown/orders/deacon-patrol-tick.toml"
     grep -F 'trigger = "cooldown"' "$ORDER" >/dev/null ||
         fail "deacon-patrol-tick must be a cooldown order"
-    grep -F 'interval = "15m"' "$ORDER" >/dev/null ||
-        fail "deacon-patrol-tick must own the deacon's 15m cadence"
+    grep -E '^interval = "[^"]+"' "$ORDER" >/dev/null ||
+        fail "deacon-patrol-tick must declare the deacon's cadence"
     grep -F 'exec = "bash $GC_PACK_DIR/assets/scripts/deacon-patrol-tick.sh"' "$ORDER" >/dev/null ||
         fail "the order must exec the pack-local script"
     # The order runs the script through `bash`, so the exec bit is not

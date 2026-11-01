@@ -7,8 +7,13 @@ Each wisp is ONE iteration: check inbox, run town-wide coordination tasks, burn
 the wisp. On crash, re-read the formula steps and determine where you left off
 from context (wisp state, last action).
 
-Formula steps are NOT materialized as child beads. Read the step descriptions
-below and work through them in order.
+Formula steps are NOT materialized as child beads. Read one step at a time
+and work through them in order, keeping the JSON in the pipe:
+
+```bash
+gc formula show mol-deacon-patrol --json | jq -r '.steps[] | .id'
+gc formula show mol-deacon-patrol --json | jq -r '.steps[] | select(.id == "mol-deacon-patrol.health-scan") | .description'
+```
 
 The loop mechanism: EVERY step is one leg of the same wisp. Never exit the wisp
 from an intermediate step — either continue to the next step or jump directly
@@ -289,14 +294,22 @@ closes that gap.
 - `A` = count of open beads assigned to the session's agent identity
 - `B` = the most recent bead.updated_at across those beads (work signal)
 
+Get the active session identities, then query open beads once per unsuspended
+rig and group them by assignee. Match each active coordination/merge session's
+agent identity to its assignee row across rigs; add counts and take the latest
+timestamp if an identity appears in multiple rigs. A missing row means `A == 0`.
+
 ```bash
-gc agents list --json --active | jq -r '.[] | .agent_id' | while read -r AGENT; do
-    ASSIGNED=$(gc bd list --status=open --assignee="$AGENT" --json --limit=0 | jq 'length')
-    LATEST=$(gc bd list --status=open --assignee="$AGENT" --json --limit=0 \\
-        | jq -r '[.[].updated_at] | max // ""')
-    printf '%s\\t%s\\t%s\\n' "$AGENT" "$ASSIGNED" "$LATEST"
-done
+gc session list --json | jq -r '[(.sessions // [])[] | select(.closed | not) | .agent_name] | unique | .[]'
+gc rig list --json | jq -r '.rigs[] | select(.suspended | not) | .name'
+# For each rig name above:
+gc bd --rig <rig> list --status=open --json --limit=0 \\
+  | jq -r 'group_by(.assignee)[] | [ (.[0].assignee // "-"), length, ([.[].updated_at] | max) ] | @tsv'
 ```
+
+Do not query beads per agent: two queries for each of about 20 active sessions
+would mean 40 calls. Grouping once per rig keeps the measured 248472 B bead
+response in the pipe and emits only 57 B of grouped output.
 
 The latest bead.updated_at is the cheapest proxy for "did this session
 move work recently?" — every claim, status transition, metadata update,
@@ -569,11 +582,22 @@ id = "system-health"
 title = "Run system diagnostics"
 needs = ["dolt-health"]
 description = """
-Run `gc doctor` for a quick workspace health check.
+Run the workspace health check once per patrol cycle:
 
 ```bash
-gc doctor
+gc doctor --json | jq -r '[.results[] | select((.status // "") | ascii_downcase != "ok") | "\\(.status)\\t\\(.name)\\t\\(.message // "")"] | .[]'
 ```
+
+Do not run the human-readable doctor, print raw JSON, or filter the human-readable
+output with awk, grep, or head. Keep the JSON in the pipe: the measured human
+output is 13853 B, raw JSON 113469 B, and filtered findings 2519 B. Do not repeat
+the check in the same cycle, even in another output format.
+
+This is the slowest command in the cycle: 157 checks took over 120 seconds.
+If narrowing it in the future, `gc doctor --check <name>` can be repeated or
+accept comma-separated names; the exit code then reflects only selected checks.
+Checks are registered according to workspace conditions, so do not hardcode
+check names here.
 
 **For simple findings:** Act directly (e.g., stale lock files, temp
 directory cleanup).

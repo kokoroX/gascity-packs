@@ -108,9 +108,10 @@ Use judgment; there are no hardcoded thresholds. Consider:
 - A pane showing an error message or hanging prompt is a red flag
 - Legitimate work can take several minutes
 
-**Deacon cadence:** the `deacon-patrol-tick` order wakes the deacon every 15
-minutes. Between ticks the deacon holds no patrol wisp and its session sits
-idle — that is normal idle, not a stall. Judge a stall from an assigned wisp
+**Deacon cadence:** the `deacon-patrol-tick` order wakes the deacon every 30
+minutes (the interval in `orders/deacon-patrol-tick.toml`). Between ticks the
+deacon holds no patrol wisp and its session sits idle — that is normal idle,
+not a stall. Judge a stall from an assigned wisp
 that is old with an idle or erroring pane, not from an empty hand.
 
 | Observation | Verdict | Action |
