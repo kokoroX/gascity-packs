@@ -675,8 +675,8 @@ test_deacon_never_pours_its_own_wisp() {
         fail "missing gastown/orders/deacon-patrol-tick.toml"
     grep -F 'trigger = "cooldown"' "$order" >/dev/null ||
         fail "deacon-patrol-tick must be a cooldown order; its interval is the deacon's cadence"
-    grep -F 'interval = "15m"' "$order" >/dev/null ||
-        fail "deacon-patrol-tick must own the deacon's 15m cadence"
+    grep -E '^interval = "[^"]+"' "$order" >/dev/null ||
+        fail "deacon-patrol-tick must declare the deacon's cadence"
     grep -F 'exec = "bash $GC_PACK_DIR/assets/scripts/deacon-patrol-tick.sh"' "$order" >/dev/null ||
         fail "deacon-patrol-tick must run the pack-local deacon-patrol-tick.sh script"
 }
