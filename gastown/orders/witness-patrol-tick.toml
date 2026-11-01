@@ -1,0 +1,10 @@
+[order]
+description = "Pace witness patrols; urgent matters use polecat --notify and nudge-mail-sweep rather than this interval."
+# One city order visits every rig and binding. Deacon scans city health every
+# 15m; orphan, halted bead, and refinery queue checks need no seconds cadence.
+# The 90m witness heartbeat window allows three 30m ticks.
+scope = "city"
+trigger = "cooldown"
+interval = "30m"
+exec = "bash $GC_PACK_DIR/assets/scripts/witness-patrol-tick.sh"
+timeout = "3m"

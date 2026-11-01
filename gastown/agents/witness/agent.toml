@@ -2,7 +2,14 @@ scope = "rig"
 wake_mode = "fresh"
 work_dir = ".gc/agents/{{.Rig}}/witness"
 nudge = "Run 'gc prime' to check worker status and begin patrol cycle."
-idle_timeout = "1h"
+# orders/witness-patrol-tick.toml owns the cadence; the tick's assignment is
+# what wakes this on_demand session. Between ticks the session is reclaimed
+# after 30s idle, which is why patrol wisps must stay at status=open: an
+# assigned in_progress row counts as awake work and would pin the session
+# (cmd/gc/session_reconciler.go:5584), while an open session/infra row does not
+# (:6297, HasNonSessionWork). Do not add idle_timeout alongside this: both are
+# set warns, and idle_timeout wins and makes the 30s policy ineffective.
+sleep_after_idle = "30s"
 # Preemptively cycle the witness before the typical provider cred-cache
 # lifetime. Claude Code (Bedrock) caches AWS creds at session start and can
 # wedge once the underlying STS/SSO token expires (~8h). Restarting under

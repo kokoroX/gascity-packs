@@ -332,43 +332,34 @@ test_witness_wisp_queries_pin_include_infra() {
     # counted lines would silence that last one too, but it is not a
     # substitute: it stops counting any query that does not pipe to jq, so an
     # unflagged new site written without --json passes silently.
-    [[ "$total" -ge 5 ]] ||
-        fail "expected at least 5 witness --type=molecule wisp queries (4 prompt + 1 formula), found $total"
+    [[ "$total" -ge 3 ]] ||
+        fail "expected at least 3 witness --type=molecule wisp queries (startup and fallbacks), found $total"
     [[ "$flagged" -eq "$total" ]] ||
         fail "witness --type=molecule wisp queries must pass --include-infra ($flagged/$total do)"
 }
 
-test_witness_wisp_reconcile_excludes_current() {
-    local prompt formula
-    prompt="$GASTOWN/agents/witness/prompt.template.md"
-    formula="$GASTOWN/formulas/mol-witness-patrol.toml"
-
-    # The reconcile must exclude the wisp it is executing BY ID, never infer
-    # "not the current one" from status. The current wisp is frequently still
-    # status=open while being executed (assigning it does not transition it),
-    # so a status-only reconcile matches it, reuses it as the successor, skips
-    # the pour, and then burns it in the burn step -- the witness ends the turn
-    # holding zero wisps and the patrol stalls until externally rebootstrapped.
-    # Observed live 2026-09-17 (pv-wisp-0k5) and earlier as PR #253's report.
+test_witness_order_paces_patrol() {
+    local prompt="$GASTOWN/agents/witness/prompt.template.md"
+    local formula="$GASTOWN/formulas/mol-witness-patrol.toml"
+    local order="$GASTOWN/orders/witness-patrol-tick.toml"
+    parse_toml "$order" "$formula" "$GASTOWN/agents/witness/agent.toml"
     for asset in "$prompt" "$formula"; do
-        grep -Eq -- '--arg self "\$\{?THIS_WISP|\$CURRENT_WISP\}?"' "$asset" ||
-            fail "$(basename "$asset") wisp reconcile must pass the current wisp id into the open-wisp query as --arg self"
-        grep -Fq -- '.id != $self' "$asset" ||
-            fail "$(basename "$asset") wisp reconcile must exclude the current wisp by id (select .id != \$self)"
+        ! grep -Fq 'mol wisp mol-witness-patrol' "$asset" ||
+            fail "witness must not pour its own patrol wisp: $asset"
+        grep -Fq -- '--status=open,in_progress --type=molecule --include-infra' "$asset" ||
+            fail "witness must find open and in_progress wisps: $asset"
+        grep -Fq '.title == "mol-witness-patrol" and .ephemeral == true' "$asset" ||
+            fail "witness must filter patrol wisps: $asset"
     done
-    # The formula's burn step must burn the resolved current wisp, not a
-    # placeholder id that a status-blind reading can repoint at the successor.
-    grep -Fq 'gc bd mol burn "$THIS_WISP" --force' "$formula" ||
-        fail "witness next-iteration must burn the resolved current wisp ($THIS_WISP), not a placeholder id"
-    # Poured successors must be assigned WITH --status=in_progress: a wisp
-    # left at status=open is invisible to the next restart's resume check
-    # (which filters status=in_progress), so startup pours a duplicate on top.
-    # Do not "fix" by switching to bd update --claim: it errors "already
-    # claimed" instead of repairing status when the assignee already matches.
-    ! grep -Eq 'gc bd update "?\$(NEXT|WISP)"? --assignee=("?\$GC_AGENT"?)\s*(;|$)' "$formula" "$prompt" ||
-        fail "witness wisp assigns must pass --status=in_progress (assign-without-transition leaves the successor invisible to the resume check)"
-    grep -Fq 'gc bd update "$NEXT" --assignee="$GC_AGENT" --status=in_progress' "$formula" ||
-        fail "witness next-iteration must assign the successor with --status=in_progress"
+    ! grep -Fq 'GC_TRIGGER_WORK_BEAD_ID' "$formula" || fail "witness must not use the trigger bead"
+    grep -Fq 'gc bd mol burn "$CURRENT_WISP" --force' "$formula" || fail "witness must burn resolved wisp"
+    # The order owns the cadence. Pin the mechanism, not the number: the
+    # interval is an operator knob and a test that hardcodes it just breaks
+    # when the city retunes it.
+    grep -Fq 'trigger = "cooldown"' "$order" ||
+        fail "witness order must be cooldown-triggered"
+    grep -Eq '^interval = "[0-9]+[smh]"' "$order" ||
+        fail "witness order must declare an interval"
 }
 
 test_refinery_wisp_lifecycle() {
@@ -376,10 +367,13 @@ test_refinery_wisp_lifecycle() {
     formula="$GASTOWN/formulas/mol-refinery-patrol.toml"
     prompt="$GASTOWN/agents/refinery/prompt.template.md"
 
-    # Every successor assignment must transition its wisp to in_progress so a
-    # restart can resume it instead of pouring another one.
-    ! grep -Eq 'gc bd update "?\$(NEXT|WISP)"? --assignee=("?\$GC_AGENT"?)[[:space:]]*(;|$)' "$formula" "$prompt" ||
-        fail "refinery wisp assigns must pass --status=in_progress"
+    # Successors stay open so they do not pin the on-demand session awake.
+    ! grep -Eq 'gc bd update "?\$(NEXT|WISP)"? --assignee=("?\$GC_AGENT"?) --status=in_progress' "$formula" "$prompt" ||
+        fail "refinery wisp assigns must not set in_progress"
+    grep -Fq 'gc bd update "$NEXT" --assignee="$GC_AGENT"; then' "$formula" ||
+        fail "refinery successor must still be assigned"
+    grep -Fq 'gc bd update "$WISP" --assignee="$GC_AGENT"; then' "$prompt" ||
+        fail "refinery startup wisp must still be assigned"
 
     # Wisp roots live in the infra tier; fallback current-wisp lookups without
     # --include-infra return no result and can leave the current wisp unburned.
@@ -391,15 +385,15 @@ test_refinery_wisp_lifecycle() {
     done
 
     # Startup must reconcile both statuses from the infra tier, then assign the
-    # retained or newly poured wisp in_progress.
+    # retained or newly poured wisp without setting its status.
     grep -Fq -- '--status=open,in_progress --type=molecule --include-infra' "$prompt" ||
         fail "refinery startup must reconcile open and in_progress wisps with --include-infra"
     ! grep -Fq '{{ .AssignedInProgressQuery }}' "$prompt" ||
         fail "refinery startup must not use the in_progress-only AssignedInProgressQuery"
 
     # Keep the human-facing startup example aligned with the executable paths.
-    grep -Fq 'gc bd update $WISP --assignee=$GC_AGENT --status=in_progress' "$formula" ||
-        fail "refinery formula description must assign its example wisp in_progress"
+    grep -Fxq '  gc bd update $WISP --assignee=$GC_AGENT' "$formula" ||
+        fail "refinery formula description must assign its example wisp without setting status"
 }
 
 test_witness_handoff_recovery_is_guarded_and_fail_closed() {
@@ -1056,7 +1050,7 @@ test_polecat_startup_uses_standard_hook_claim
 test_review_leg_contract_forbids_synthetic_mutation
 test_prime_prompts_are_city_generic_and_compact
 test_witness_wisp_queries_pin_include_infra
-test_witness_wisp_reconcile_excludes_current
+test_witness_order_paces_patrol
 test_refinery_wisp_lifecycle
 test_patrol_wisp_pours_parse_full_json_stdout
 test_witness_handoff_recovery_is_guarded_and_fail_closed

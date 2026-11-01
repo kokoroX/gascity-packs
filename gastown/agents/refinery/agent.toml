@@ -3,5 +3,7 @@ wake_mode = "fresh"
 work_dir = ".gc/worktrees/{{.Rig}}/refinery"
 nudge = "Run 'gc prime' to check merge queue and begin processing."
 pre_start = ["{{.ConfigDir}}/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
-idle_timeout = "2h"
+# Setting both idle_timeout and sleep_after_idle warns; idle_timeout wins and
+# would make the 30s sleep policy ineffective.
+sleep_after_idle = "30s"
 max_active_sessions = 1

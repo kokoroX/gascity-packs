@@ -75,7 +75,7 @@ description = "Import binding prefix for gastown agent identities, including tra
 default = ""
 
 [vars.witness_stale_min]
-description = "Minutes of witness heartbeat silence before health-scan's deterministic pass calls the patrol loop stalled. The default is 1.5x the witness idle_timeout (1h) — the longest legitimate silence for a healthy witness, and an order of magnitude under the multi-hour stalls this catches. Lower it only if your witness idle_timeout is lower."
+description = "Minutes of witness heartbeat silence before health-scan's deterministic pass calls the patrol stalled. The default 90m allows three 30m witness-patrol-tick intervals; adjust it with the order cadence."
 default = "90"
 
 [[steps]]
@@ -177,8 +177,8 @@ The controller handles "is the agent running?" The deacon handles
 
 **Config: witness_stale_min = {{witness_stale_min}}**
 
-Run this before forming any judgment. A witness whose self-scheduled patrol
-loop has died still reports a healthy session state: it sits `asleep` or
+Run this before forming any judgment. A witness whose order-paced patrol
+has stalled can still report a healthy session state: it sits `asleep` or
 `active` and reads as legitimate idle in every other signal in this step. The
 controller sees a live session, and wisp staleness on an idle rig is
 indistinguishable from a healthy lull. Patrol stalls of 14h to 63h were
@@ -225,13 +225,12 @@ systemic patterns are what the mayor escalation at the end of this step is for.
 
 **For each active rig, assess witness health:**
 
-Check witness patrol wisp freshness. Each patrol cycle burns a wisp.
-If the last wisp is much older than the maximum backoff cap (300s) plus
-buffer, the witness may be stuck. But if there's no active work in the
-rig, the witness is legitimately idle — not stuck. Idle only excuses a stale
-*wisp*: the heartbeat pass above already ruled on whether the loop itself is
-alive, and an empty queue does not stop a live witness from waking. If the
-heartbeat pass returned `stalled`, do not talk yourself out of it here.
+An empty-handed, idle witness between ticks is normal, even on an active rig;
+it is not stuck merely because it is not running. Assess the heartbeat silence
+window above and the age and backlog of assigned patrol wisps. Each completed
+cycle burns its wisp; a stale assigned wisp or a heartbeat beyond the window
+may indicate a stall. If the heartbeat pass returned `stalled`, do not talk
+yourself out of it here.
 
 **For each active rig, assess refinery health:**
 
@@ -309,8 +308,9 @@ If `A > 0` AND `now - B` has grown well past the patrol's natural
 cadence (default guideline: 30min — roughly 6x the 300s max patrol
 backoff), the session is holding work without making progress. This
 is exactly why an LLM does it, not Go code. Consider:
-- Coordination agents (refinery, witness) naturally cycle in seconds
-  when work is present; 30min is an eternity, not a lull.
+- Witness patrols are paced by a 30m order; consider that interval and
+  heartbeat window alongside the age of any assigned work. Refinery queue
+  activity has its own cadence.
 - Polecats may take longer per step; be more lenient before flagging.
 - A freshly-assigned bead with no prior activity gets `updated_at` at
   assignment time; if it's hours old, the session picked it up but
