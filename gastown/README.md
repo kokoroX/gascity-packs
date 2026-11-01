@@ -36,7 +36,11 @@ The recipe must read warrant metadata from the claimed bead via
 ## Merge strategies
 
 The `default_merge_strategy` formula variable defaults to `direct`; an explicit
-`metadata.merge_strategy` on a work bead takes precedence. In direct mode refinery lands the
+`metadata.merge_strategy` on a work bead takes precedence. A non-empty agent
+environment variable `GC_MERGE_STRATEGY_DEFAULT` (set under
+`[patches.agent.env]` in `city.toml`) overrides the formula default, and an
+invalid strategy value stops the merge rather than falling back to `direct`.
+In direct mode refinery lands the
 branch on the target and closes the bead after verifying the remote target.
 With `mr` / `pr`, refinery publishes a GitHub pull request and records a
 pending handoff. The source bead stays `blocked` until

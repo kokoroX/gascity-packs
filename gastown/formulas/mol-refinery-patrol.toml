@@ -40,6 +40,10 @@ Merge strategy is per-work-bead metadata:
 - `direct` (default): fast-forward merge to target and push
 - `mr` / `pr`: publish a GitHub pull request instead of landing directly
 
+When the work bead does not set `metadata.merge_strategy`, the agent
+environment variable `GC_MERGE_STRATEGY_DEFAULT` (non-empty) overrides the
+formula's `default_merge_strategy`; otherwise the formula default applies.
+
 In `mr` mode, PR publication is not completion. Refinery records the
 verified PR identity and head on the work bead, then leaves the bead
 blocked until the PR is merged. Each patrol reconciles one pending PR
@@ -681,6 +685,9 @@ needs = ["handle-failures"]
 description = """
 **Config: target_branch = {{target_branch}}**
 **Config: default_merge_strategy = {{default_merge_strategy}}**
+**Merge strategy default precedence: bead `metadata.merge_strategy` >
+non-empty agent env `GC_MERGE_STRATEGY_DEFAULT` > formula
+`default_merge_strategy` ({{default_merge_strategy}}).**
 **Config (deprecated; no effect on successful handoffs):
 delete_merged_branches = {{delete_merged_branches}}**
 
@@ -688,7 +695,22 @@ Read the merge target and merge strategy from the work bead metadata:
 ```bash
 BRANCH=$(gc bd show $WORK --json | jq -r '.[0].metadata.branch')
 TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_branch}}"')
-MERGE_STRATEGY=$(gc bd show $WORK --json | jq -r '.[0].metadata.merge_strategy // "{{default_merge_strategy}}"')
+# BEGIN MERGE_STRATEGY_RESOLUTION
+DEFAULT_MERGE_STRATEGY="${GC_MERGE_STRATEGY_DEFAULT:-{{default_merge_strategy}}}"
+MERGE_STRATEGY=$(gc bd show $WORK --json | jq -r --arg d "$DEFAULT_MERGE_STRATEGY" '.[0].metadata.merge_strategy // $d')
+case "$MERGE_STRATEGY" in
+  direct|mr|pr|mirror-pr) ;;
+  *)
+    echo "Invalid merge strategy '$MERGE_STRATEGY' (from metadata.merge_strategy, GC_MERGE_STRATEGY_DEFAULT, or default_merge_strategy). Expected direct, mr, pr, or mirror-pr. STOP. Do not mutate bead state."
+    gc mail send mayor/ -s "ESCALATION: invalid merge_strategy for $WORK" -m "Work bead: $WORK
+Resolved merge strategy: $MERGE_STRATEGY
+Expected one of: direct, mr, pr, mirror-pr.
+Source: metadata.merge_strategy, GC_MERGE_STRATEGY_DEFAULT, or default_merge_strategy."
+    gc runtime drain-ack
+    exit 1
+    ;;
+esac
+# END MERGE_STRATEGY_RESOLUTION
 EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')
 if [ "$MERGE_STRATEGY" = "pr" ]; then
   MERGE_STRATEGY="mr"
