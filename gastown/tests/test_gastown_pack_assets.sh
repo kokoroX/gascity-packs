@@ -726,12 +726,11 @@ if verify >= metadata:
 PY
 }
 
-# The refinery default can be configured per agent through the environment
-# (city.toml [patches.agent.env]) because patrol wisps pour their own
-# successors and never re-run the city's sling-time formula_vars injection.
-# The merge step must therefore resolve: bead metadata > non-empty
-# GC_MERGE_STRATEGY_DEFAULT > formula default, and reject anything that is not
-# an implemented strategy instead of silently landing as direct.
+# Refinery merge behavior can be configured per agent through city.toml
+# [patches.agent.env]. The merge step resolves bead metadata > matching target
+# glob (direct) > non-empty GC_MERGE_STRATEGY_DEFAULT > formula default, and
+# rejects anything that is not an implemented strategy instead of silently
+# landing as direct.
 test_refinery_merge_strategy_env_default_and_validation() {
     local formula refinery_prompt block
     formula="$GASTOWN/formulas/mol-refinery-patrol.toml"
@@ -752,8 +751,10 @@ PY
 
     [[ "$block" == *'GC_MERGE_STRATEGY_DEFAULT'* ]] ||
         fail "merge-push must fall back to the GC_MERGE_STRATEGY_DEFAULT agent env var"
-    [[ "$block" == *'jq -r --arg d "$DEFAULT_MERGE_STRATEGY"'* ]] ||
-        fail "merge-push must pass the effective default into jq instead of a literal formula default"
+    [[ "$block" == *'GC_MERGE_STRATEGY_DIRECT_TARGETS'* ]] ||
+        fail "merge-push must check GC_MERGE_STRATEGY_DIRECT_TARGETS"
+    [[ "$block" == *'set -f'* && "$block" == *'set +f'* ]] ||
+        fail "target glob iteration must disable and restore pathname expansion"
     [[ "$block" == *'direct|mr|pr|mirror-pr'* ]] ||
         fail "merge-push must enumerate the accepted merge strategies"
     [[ "$block" == *'STOP'* ]] ||
@@ -771,23 +772,41 @@ PY
 
     local out rc
     local -a cases=(
-        # name|metadata json|env value|formula default|want strategy|want rc
-        'bead metadata wins|[{"metadata":{"merge_strategy":"mr"}}]|mirror-pr|direct|mr|0'
-        'env overrides formula default|[{"metadata":{}}]|mirror-pr|direct|mirror-pr|0'
-        'empty env falls back to formula default|[{"metadata":{}}]||mirror-pr|mirror-pr|0'
-        'pr is accepted|[{"metadata":{"merge_strategy":"pr"}}]||direct|pr|0'
-        'invalid bead value stops|[{"metadata":{"merge_strategy":"local"}}]||direct||1'
-        'invalid env value stops|[{"metadata":{}}]|bogus|direct||1'
+        # name|metadata json|default env|direct targets|formula default|target|want strategy|want source|want rc
+        'env unset preserves formula default|[{"metadata":{}}]|||mirror-pr|main|mirror-pr|default_merge_strategy|0'
+        'target match selects direct|[{"metadata":{}}]|mr|req/*|direct|req/foo|direct|target req/foo matched GC_MERGE_STRATEGY_DIRECT_TARGETS|0'
+        'target miss falls back to env|[{"metadata":{}}]|mirror-pr|req/*|direct|main|mirror-pr|GC_MERGE_STRATEGY_DEFAULT|0'
+        'bead metadata wins over target|[{"metadata":{"merge_strategy":"mr"}}]|pr|req/*|direct|req/foo|mr|metadata.merge_strategy|0'
+        'one of multiple globs matches|[{"metadata":{}}]||docs/* req/*|mr|req/foo|direct|target req/foo matched GC_MERGE_STRATEGY_DIRECT_TARGETS|0'
+        'glob survives matching cwd filenames|[{"metadata":{}}]|mirror-pr|req/*|direct|req/baz|direct|target req/baz matched GC_MERGE_STRATEGY_DIRECT_TARGETS|0'
+        'env default overrides formula|[{"metadata":{}}]|mirror-pr||direct|main|mirror-pr|GC_MERGE_STRATEGY_DEFAULT|0'
+        'empty env falls back to formula default|[{"metadata":{}}]|||direct|main|direct|default_merge_strategy|0'
+        'pr is accepted|[{"metadata":{"merge_strategy":"pr"}}]||||main|pr|metadata.merge_strategy|0'
+        'invalid bead value stops|[{"metadata":{"merge_strategy":"local"}}]||||main||metadata.merge_strategy|1'
+        'invalid env value stops|[{"metadata":{}}]|bogus||direct|main||GC_MERGE_STRATEGY_DEFAULT|1'
     )
 
     run_resolution() {
-        local metadata="$1" env_value="$2" formula_default="$3" snippet
+        local metadata="$1" env_value="$2" direct_targets="$3" formula_default="$4" target="$5" snippet tmpdir
         snippet=$(printf '%s\n' "$block" |
             sed "s/{{default_merge_strategy}}/$formula_default/g")
+        tmpdir=$(mktemp -d) || return 1
         (
-            # shellcheck disable=SC2034  # read by the lifted snippet via eval
+            cd "$tmpdir" || exit 1
+            mkdir req
+            touch req/foo req/bar
             WORK=TEST-refinery-bead
-            export GC_MERGE_STRATEGY_DEFAULT="$env_value"
+            TARGET="$target"
+            if [ -n "$env_value" ]; then
+                export GC_MERGE_STRATEGY_DEFAULT="$env_value"
+            else
+                unset GC_MERGE_STRATEGY_DEFAULT
+            fi
+            if [ -n "$direct_targets" ]; then
+                export GC_MERGE_STRATEGY_DIRECT_TARGETS="$direct_targets"
+            else
+                unset GC_MERGE_STRATEGY_DIRECT_TARGETS
+            fi
             # shellcheck disable=SC2329  # invoked by the lifted snippet via eval
             gc() {
                 case "$1 $2" in
@@ -797,20 +816,34 @@ PY
                     *) return 1 ;;
                 esac
             }
-            eval "$snippet" >/dev/null 2>&1
-            printf '%s' "$MERGE_STRATEGY"
+            set +e
+            eval "$snippet" 2>&1 | grep -E '^(merge strategy:|Invalid merge strategy)' | tail -n 1
+            rc=${PIPESTATUS[0]}
+            printf '\n__RC__%s\n' "$rc"
         )
+        local result
+        result=$?
+        rm -rf "$tmpdir"
+        return "$result"
     }
 
-    local entry name metadata env_value formula_default want_strategy want_rc
+    local entry name metadata env_value direct_targets formula_default target want_strategy want_source want_rc result strategy_line rc_line
     for entry in "${cases[@]}"; do
-        IFS='|' read -r name metadata env_value formula_default want_strategy want_rc <<<"$entry"
-        rc=0
-        out=$(run_resolution "$metadata" "$env_value" "$formula_default") || rc=$?
+        IFS='|' read -r name metadata env_value direct_targets formula_default target want_strategy want_source want_rc <<<"$entry"
+        result=$(run_resolution "$metadata" "$env_value" "$direct_targets" "$formula_default" "$target") ||
+            fail "merge-strategy resolution '$name' execution failed"
+        strategy_line=$(printf '%s\n' "$result" | grep -E '^(merge strategy:|Invalid merge strategy)' | tail -n 1 || true)
+        rc_line=$(printf '%s\n' "$result" | grep '^__RC__' | tail -n 1)
+        rc=${rc_line#__RC__}
         [[ "$rc" -eq "$want_rc" ]] ||
             fail "merge-strategy resolution '$name': want rc $want_rc, got $rc"
-        [[ "$out" == "$want_strategy" ]] ||
-            fail "merge-strategy resolution '$name': want '$want_strategy', got '$out'"
+        if [[ "$want_rc" -eq 0 ]]; then
+            [[ "$strategy_line" == "merge strategy: $want_strategy (from $want_source)" ]] ||
+                fail "merge-strategy resolution '$name': want '$want_strategy' from '$want_source', got '$strategy_line'"
+        else
+            [[ "$strategy_line" == "Invalid merge strategy "*" (from $want_source)."* ]] ||
+                fail "merge-strategy resolution '$name': expected invalid-strategy report from '$want_source', got '$strategy_line'"
+        fi
     done
 }
 
