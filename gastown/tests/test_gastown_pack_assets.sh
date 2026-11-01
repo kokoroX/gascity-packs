@@ -726,6 +726,94 @@ if verify >= metadata:
 PY
 }
 
+# The refinery default can be configured per agent through the environment
+# (city.toml [patches.agent.env]) because patrol wisps pour their own
+# successors and never re-run the city's sling-time formula_vars injection.
+# The merge step must therefore resolve: bead metadata > non-empty
+# GC_MERGE_STRATEGY_DEFAULT > formula default, and reject anything that is not
+# an implemented strategy instead of silently landing as direct.
+test_refinery_merge_strategy_env_default_and_validation() {
+    local formula refinery_prompt block
+    formula="$GASTOWN/formulas/mol-refinery-patrol.toml"
+    refinery_prompt="$GASTOWN/agents/refinery/prompt.template.md"
+
+    command -v jq >/dev/null 2>&1 ||
+        fail "jq required to execute the lifted merge-strategy resolution block"
+
+    block=$(python3 - "$formula" <<'PY'
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+start = text.index("# BEGIN MERGE_STRATEGY_RESOLUTION")
+end = text.index("# END MERGE_STRATEGY_RESOLUTION", start)
+end += len("# END MERGE_STRATEGY_RESOLUTION")
+print(text[start:end])
+PY
+) || fail "merge-push must keep a MERGE_STRATEGY_RESOLUTION block for the env-default contract"
+
+    [[ "$block" == *'GC_MERGE_STRATEGY_DEFAULT'* ]] ||
+        fail "merge-push must fall back to the GC_MERGE_STRATEGY_DEFAULT agent env var"
+    [[ "$block" == *'jq -r --arg d "$DEFAULT_MERGE_STRATEGY"'* ]] ||
+        fail "merge-push must pass the effective default into jq instead of a literal formula default"
+    [[ "$block" == *'direct|mr|pr|mirror-pr'* ]] ||
+        fail "merge-push must enumerate the accepted merge strategies"
+    [[ "$block" == *'STOP'* ]] ||
+        fail "an invalid merge strategy must STOP rather than fall back to direct"
+
+    # Successor pours must not abort when DEFAULT_MERGE_STRATEGY was never set:
+    # the patrol wisp chain pours from inside the prompt, where that variable is
+    # not rendered by the formula compiler.
+    local fallback_pours
+    fallback_pours=$(grep -c -F 'default_merge_strategy="${DEFAULT_MERGE_STRATEGY:-${GC_MERGE_STRATEGY_DEFAULT:-direct}}"' "$refinery_prompt" || true)
+    [[ "${fallback_pours:-0}" -ge 3 ]] ||
+        fail "every refinery successor pour must fall back to GC_MERGE_STRATEGY_DEFAULT/direct (found ${fallback_pours:-0})"
+    ! grep -F 'DEFAULT_MERGE_STRATEGY:?' "$refinery_prompt" >/dev/null ||
+        fail "refinery successor pours must not require DEFAULT_MERGE_STRATEGY with :?; it is unset in the prompt"
+
+    local out rc
+    local -a cases=(
+        # name|metadata json|env value|formula default|want strategy|want rc
+        'bead metadata wins|[{"metadata":{"merge_strategy":"mr"}}]|mirror-pr|direct|mr|0'
+        'env overrides formula default|[{"metadata":{}}]|mirror-pr|direct|mirror-pr|0'
+        'empty env falls back to formula default|[{"metadata":{}}]||mirror-pr|mirror-pr|0'
+        'pr is accepted|[{"metadata":{"merge_strategy":"pr"}}]||direct|pr|0'
+        'invalid bead value stops|[{"metadata":{"merge_strategy":"local"}}]||direct||1'
+        'invalid env value stops|[{"metadata":{}}]|bogus|direct||1'
+    )
+
+    run_resolution() {
+        local metadata="$1" env_value="$2" formula_default="$3" snippet
+        snippet=$(printf '%s\n' "$block" |
+            sed "s/{{default_merge_strategy}}/$formula_default/g")
+        (
+            # shellcheck disable=SC2034  # read by the lifted snippet via eval
+            WORK=TEST-refinery-bead
+            export GC_MERGE_STRATEGY_DEFAULT="$env_value"
+            # shellcheck disable=SC2329  # invoked by the lifted snippet via eval
+            gc() {
+                case "$1 $2" in
+                    "bd show") printf '%s\n' "$metadata" ;;
+                    "mail send") : ;;
+                    "runtime drain-ack") : ;;
+                    *) return 1 ;;
+                esac
+            }
+            eval "$snippet" >/dev/null 2>&1
+            printf '%s' "$MERGE_STRATEGY"
+        )
+    }
+
+    local entry name metadata env_value formula_default want_strategy want_rc
+    for entry in "${cases[@]}"; do
+        IFS='|' read -r name metadata env_value formula_default want_strategy want_rc <<<"$entry"
+        rc=0
+        out=$(run_resolution "$metadata" "$env_value" "$formula_default") || rc=$?
+        [[ "$rc" -eq "$want_rc" ]] ||
+            fail "merge-strategy resolution '$name': want rc $want_rc, got $rc"
+        [[ "$out" == "$want_strategy" ]] ||
+            fail "merge-strategy resolution '$name': want '$want_strategy', got '$out'"
+    done
+}
+
 # The refinery formula and its prompt are one contract surface (the paired pin
 # in test_work_bead_resolution_discriminator_is_pinned loops both paths for the
 # same reason), so the prompt must not contradict the formula's guarded rebase.
@@ -945,6 +1033,7 @@ test_boot_deacon_observation_query_sees_wisps_tier
 test_boot_never_pours_its_own_wisp
 test_deacon_never_pours_its_own_wisp
 test_refinery_direct_merge_is_worktree_safe_and_fail_closed
+test_refinery_merge_strategy_env_default_and_validation
 test_refinery_rebase_guidance_matches_the_guarded_step
 test_refinery_pre_existing_failures_use_city_store
 
