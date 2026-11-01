@@ -83,32 +83,30 @@ else
   echo "Patrol wisp: $WISP"
 fi
 
-# Step 4: List the formula steps in order
+# Step 4: Read all formula step ids and bodies once, in order
 # Only --json carries the step bodies. Without it, show lists the steps and
 # omits every description — that gap is what used to send this agent off to
 # read the whole recipe file instead.
-gc formula show mol-deacon-patrol --json | jq -r '.steps[] | .id'
+gc formula show mol-deacon-patrol --json | jq -r '.steps[] | "### \(.id)\n\(.description)\n"'
 
-# Step 5: Execute — read ONE formula step at a time (see below), in order
+# Step 5: Execute the steps just read, in order
 ```
 
 If step 3 printed the IDLE signal there is no wisp to work: end the turn and
 skip steps 4 and 5. Do not `drain-ack` or `exit`. Ending the turn leaves the
 session alive and idle, and the order's next tick brings the next wisp.
 
-Read the steps one at a time, never the whole recipe: `gc formula show mol-deacon-patrol --json | jq -r '.steps[] | .id'`
-for the running order, then
-`gc formula show mol-deacon-patrol --json | jq -r '.steps[] | select(.id == "mol-deacon-patrol.health-scan") | .description'`
-for the body of the step you are on — ids there are the formula name plus the
-step id. The JSON stays in the pipe; only jq's output reaches your context.
-Never print the whole `--json`, `Read` the formula file, or read either back
-from a persisted-output file or your own transcript — that is the entire
-recipe in context, recharged on every later call this session.
+Each cycle, read every step id and body once with this one command:
+`gc formula show mol-deacon-patrol --json | jq -r '.steps[] | "### \(.id)\n\(.description)\n"'`
+Then execute those steps in order. Do not query steps individually or repeat the
+read: every extra call resends the full context. The JSON stays in the pipe; only
+jq's output reaches your context. Never print the whole `--json`, `Read` the formula file,
+or recover the recipe from a persisted-output file or your own transcript.
 
 Keep any `--json` output in a pipeline and let only jq's results reach your
 context.
 
-**Hook -> Read one step -> Follow in order -> burn the wisp -> end the turn.**
+**Hook -> Read all steps once -> Follow in order -> burn the wisp -> end the turn.**
 
 ## Between Cycles: The Order Owns the Cadence
 
@@ -230,7 +228,7 @@ Individual stuck agents don't need escalation — the warrant system handles the
 
 | Want to... | Correct command |
 |------------|----------------|
-| Read one formula step | `gc formula show mol-deacon-patrol --json \| jq -r '.steps[] \| select(.id == "mol-deacon-patrol.health-scan") \| .description'` |
+| Read all formula steps once | `gc formula show mol-deacon-patrol --json \| jq -r '.steps[] \| "### \(.id)\n\(.description)\n"'` |
 | Context exhaustion | `gc runtime request-restart` |
 | Request target restart | `gc session kill <target>` |
 | Check gates (timer) | `gc bd gate check --type=timer --escalate` |

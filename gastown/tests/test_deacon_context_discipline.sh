@@ -20,10 +20,16 @@ def require(condition, message):
     if not condition:
         raise SystemExit('FAIL: ' + message)
 
+all_steps_query = r'''gc formula show mol-deacon-patrol --json | jq -r '.steps[] | "### \(.id)\n\(.description)\n"' '''.strip()
 for name, text in [('prompt', prompt), ('formula', formula_text)]:
+    formula_command = all_steps_query if name == 'prompt' else all_steps_query.replace('\\', '\\\\')
     require('gc bd formula show' not in text, name + ' uses the body-less formula command')
-    require(re.search(r'gc formula show mol-deacon-patrol --json \| jq[^\n]*select\(\.id == "mol-deacon-patrol\.health-scan"\)[^\n]*\.description', text) is not None,
-            name + ' must show a one-step formula query')
+    require(formula_command in text,
+            name + ' must show the all-steps formula query')
+    require('select(.id ==' not in text,
+            name + ' must not query formula steps individually')
+    require(re.search(r'one step at a time|one formula step|read one step', text, re.IGNORECASE) is None,
+            name + ' must not describe one-step-at-a-time formula reads')
 require('`Read` the formula file' in prompt, 'prompt must forbid reading the formula file')
 require('persisted-output file or your own transcript' in prompt, 'prompt must forbid recovering the recipe from saved output')
 require('gc agents list' not in formula_text, 'formula uses nonexistent agents list')

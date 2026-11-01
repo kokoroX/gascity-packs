@@ -7,12 +7,11 @@ Each wisp is ONE iteration: check inbox, run town-wide coordination tasks, burn
 the wisp. On crash, re-read the formula steps and determine where you left off
 from context (wisp state, last action).
 
-Formula steps are NOT materialized as child beads. Read one step at a time
-and work through them in order, keeping the JSON in the pipe:
+Formula steps are NOT materialized as child beads. Read all steps once per
+cycle and work through them in order, keeping the JSON in the pipe:
 
 ```bash
-gc formula show mol-deacon-patrol --json | jq -r '.steps[] | .id'
-gc formula show mol-deacon-patrol --json | jq -r '.steps[] | select(.id == "mol-deacon-patrol.health-scan") | .description'
+gc formula show mol-deacon-patrol --json | jq -r '.steps[] | "### \\(.id)\\n\\(.description)\\n"'
 ```
 
 The loop mechanism: EVERY step is one leg of the same wisp. Never exit the wisp
