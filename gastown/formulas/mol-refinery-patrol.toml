@@ -2,7 +2,7 @@ description = """
 Refinery patrol loop. Poured as a root-only wisp on startup:
 
   WISP=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --var default_merge_strategy={{default_merge_strategy}} --json | jq -r '.new_epic_id // empty')
-  gc bd update $WISP --assignee=$GC_AGENT --status=in_progress
+  gc bd update $WISP --assignee=$GC_AGENT
 
 `--json` prints one multi-line object on stdout and gc writes config
 advisories to stderr: pipe the whole stdout into jq, never through
@@ -162,7 +162,7 @@ if [ -z "$NEXT" ]; then
   gc runtime drain-ack
   exit 1
 fi
-if ! gc bd update "$NEXT" --assignee="$GC_AGENT" --status=in_progress; then
+if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
   echo "Could not assign next refinery wisp; not requesting restart."
   # Unassigned, no assignee-scoped query can ever find it again: reclaim it by id.
   gc bd mol burn "$NEXT" --force || echo "Could not burn the unassigned refinery wisp $NEXT; burn it by hand."
@@ -430,7 +430,7 @@ Target: $TARGET"
     gc runtime drain-ack
     exit 1
   fi
-  if ! gc bd update "$NEXT" --assignee="$GC_AGENT" --status=in_progress; then
+  if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
     echo "Could not assign next refinery wisp; not burning."
     # Unassigned, no assignee-scoped query can ever find it again: reclaim it by id.
     gc bd mol burn "$NEXT" --force || echo "Could not burn the unassigned refinery wisp $NEXT; burn it by hand."
@@ -547,7 +547,7 @@ if [ -z "$NEXT" ]; then
   gc runtime drain-ack
   exit 1
 fi
-if ! gc bd update "$NEXT" --assignee="$GC_AGENT" --status=in_progress; then
+if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
   echo "Could not assign next refinery wisp; not burning."
   # Unassigned, no assignee-scoped query can ever find it again: reclaim it by id.
   gc bd mol burn "$NEXT" --force || echo "Could not burn the unassigned refinery wisp $NEXT; burn it by hand."
@@ -653,7 +653,7 @@ TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_bran
        gc runtime drain-ack
        exit 1
      fi
-     if ! gc bd update "$NEXT" --assignee="$GC_AGENT" --status=in_progress; then
+     if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
        echo "Could not assign next refinery wisp; not burning."
        # Unassigned, no assignee-scoped query can ever find it again: reclaim it by id.
        gc bd mol burn "$NEXT" --force || echo "Could not burn the unassigned refinery wisp $NEXT; burn it by hand."
@@ -803,7 +803,7 @@ Target: $TARGET"
     gc runtime drain-ack
     exit 1
   fi
-  if ! gc bd update "$NEXT" --assignee="$GC_AGENT" --status=in_progress; then
+  if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
     echo "Could not assign next refinery wisp; not burning."
     # Unassigned, no assignee-scoped query can ever find it again: reclaim it by id.
     gc bd mol burn "$NEXT" --force || echo "Could not burn the unassigned refinery wisp $NEXT; burn it by hand."
@@ -1673,7 +1673,7 @@ if [ -z "$NEXT" ]; then
   gc runtime drain-ack
   exit 1
 fi
-if ! gc bd update "$NEXT" --assignee="$GC_AGENT" --status=in_progress; then
+if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
   echo "Could not assign next refinery wisp; not burning."
   # Unassigned, no assignee-scoped query can ever find it again: reclaim it by id.
   gc bd mol burn "$NEXT" --force || echo "Could not burn the unassigned refinery wisp $NEXT; burn it by hand."

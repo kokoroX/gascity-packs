@@ -44,7 +44,9 @@ mode = "always"
 [[named_session]]
 template = "witness"
 scope = "rig"
-mode = "always"
+# orders/witness-patrol-tick.toml owns cadence; on_demand reclaims idle
+# witnesses. always disables idle_timeout and max_session_age (docs/reference/config.md).
+mode = "on_demand"
 
 [[named_session]]
 template = "refinery"

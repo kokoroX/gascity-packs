@@ -1,21 +1,7 @@
 description = """
-Witness patrol loop. Poured as a root-only wisp on startup:
-
-  WISP=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{binding_prefix}}' --json | jq -r '.new_epic_id // empty')
-  gc bd update $WISP --assignee=$GC_AGENT --status=in_progress
-
-`--json` prints one multi-line object on stdout and gc writes config
-advisories to stderr: pipe the whole stdout into jq, never through
-`2>&1`, `tail`, or `head`.
-
-`--status=in_progress` on the assign is load-bearing: `gc bd mol wisp` pours
-at status=open and `--assignee` alone does not transition it, so a wisp
-poured without it is invisible to the startup resume check (which filters
-status=in_progress) — the next restart pours a duplicate on top of it.
-
-Each wisp is ONE iteration: check for work, patrol, pour the next
-iteration. On crash, re-read the formula steps and determine where
-you left off from context (bead state, mail state, last action).
+Witness patrol loop. The witness-patrol-tick order pours and assigns one
+root-only wisp per tick. Each wisp is ONE iteration: check for work, patrol,
+burn it, and end the turn. On crash, adopt the assigned wisp and resume.
 
 Formula steps are NOT materialized as child beads, so this formula is the
 only copy of a step. Read them ONE AT A TIME and never print the whole
@@ -38,9 +24,8 @@ recovery branch on a healthy cycle, which is the normal case.
 
 The loop mechanism: EVERY step is one leg of the same wisp. Never exit
 the wisp from an intermediate step — either continue to the next step
-or jump directly to `next-iteration` to pour and burn. Exiting without
-burning leaks wisps (see #1884). The prompt only bootstraps the first
-wisp.
+or jump directly to `next-iteration` to burn the wisp and end the turn.
+Exiting without burning leaks wisps (see #1884). The order owns the cadence.
 
 ## Witness Role
 
@@ -95,10 +80,6 @@ formula = "mol-witness-patrol"
 [vars.binding_prefix]
 description = "Import binding prefix for gastown agent identities, including trailing dot when bound."
 default = ""
-
-[vars.event_timeout]
-description = "Seconds to sleep before re-checking. Replaces former event-watch loop which hot-spun on cache-reconcile firehose."
-default = "60"
 
 [vars.halt_escalation_interval]
 description = "Seconds before a halted, unrouted work bead that nobody has acted on is escalated to the mayor again. A halt is parked, not queued: nothing else surfaces it."
@@ -168,8 +149,8 @@ discharge this cycle becomes a bead, or goes back in your inbox with
 `gc mail mark-unread <id>`.
 
 Close this step and continue to `recover-orphaned-beads` — do NOT exit
-the wisp here. The `next-iteration` step is the only place that pours
-the next wisp and burns this one."""
+the wisp here. The `next-iteration` step is the only place that burns
+this wisp and ends the turn."""
 
 [[steps]]
 id = "recover-orphaned-beads"
@@ -353,7 +334,7 @@ recipe's context.
 
 **Exit criteria:** every assigned bead in this rig classified, or recovery
 aborted on an unusable map. Do NOT exit the wisp here — `next-iteration` is
-the only place that pours the next wisp and burns this one."""
+the only place that burns this wisp and ends the turn."""
 
 [[steps]]
 id = "salvage-orphan-work"
@@ -1125,8 +1106,7 @@ gc bd update <bead> --set-metadata recovered=true
 
 **Exit criteria:** All orphaned beads recovered, worktrees cleaned.
 Or no orphans found. Continue to `check-refinery` — do NOT exit the
-wisp here. The `next-iteration` step is the only place that pours the
-next wisp and burns this one."""
+wisp here. The `next-iteration` step burns this wisp and ends the turn."""
 
 [[steps]]
 id = "escalate-halted-beads"
@@ -1190,8 +1170,8 @@ reported to mayor as a disabled sweep.
 **Exit criteria:** Every halted, unrouted bead evaluated, with an escalation
 mailed for each due candidate — or a report about a sweep that could not read
 its candidates. Continue to `check-refinery` — do NOT exit the wisp here. The
-`next-iteration` step is the only place that pours the next wisp and burns
-this one."""
+`next-iteration` step is the only place that burns this wisp and ends
+the turn."""
 
 [[steps]]
 id = "check-refinery"
@@ -1265,8 +1245,7 @@ Recommendation: <what should happen>"
 
 **Exit criteria:** Queue health assessed; nudge sent or escalation
 filed if needed. Continue to `check-polecat-health` — do NOT exit the
-wisp here. The `next-iteration` step is the only place that pours the
-next wisp and burns this one."""
+wisp here. The `next-iteration` step burns this wisp and ends the turn."""
 
 [[steps]]
 id = "check-polecat-health"
@@ -1335,16 +1314,15 @@ polecats, systemic issue).
 **Exit criteria:** All active polecat work beads assessed. Warrants
 filed for stuck agents. Or no stuck polecats found. Continue to
 `next-iteration` — do NOT exit the wisp here. The `next-iteration` step
-is the only place that pours the next wisp and burns this one."""
+is the only place that burns this wisp and ends the turn."""
 
 [[steps]]
 id = "next-iteration"
-title = "Pour next iteration and loop"
+title = "Burn this wisp and end the turn"
 needs = ["check-polecat-health"]
 description = """
-**Config: event_timeout = {{event_timeout}}**
-
-End of patrol cycle. Pour the next iteration, then wait or exit.
+End of patrol cycle. Burn this wisp and end the turn; the witness-patrol-tick
+order owns the cadence and assigns the next wisp.
 
 **1. Context check:**
 
@@ -1352,75 +1330,33 @@ If context feels heavy or RSS is high:
 ```bash
 gc runtime request-restart
 ```
-This blocks forever. The controller restarts you. The next wisp
-is already assigned — the new session resumes from context.
+This blocks until the controller restarts the session; startup adopts the
+still-assigned wisp.
 
-**2. Pour next iteration BEFORE burning (reconcile to exactly one):**
+**2. Resolve and burn this wisp:**
 
-Reuse an already-queued wisp instead of pouring a duplicate. A prior cycle
-may have poured a next wisp without burning, or a restart may have raced —
-keep one open patrol wisp and burn any surplus, so wisps never accumulate.
-Wisp roots are `issue_type=molecule` (never `--type=wisp`, which is not a
-valid gc bd type and matches nothing). They are also ephemeral, so they live
-in the wisps tier that `gc bd list` hides without `--include-infra` — drop that
-flag and this query returns `[]` even when a wisp is already queued.
-
-**Exclude the wisp you are executing, by id — never by status.** The current
-wisp is frequently still `status=open` while it is being executed (assigning
-it does not transition it), so a reconcile that merely filters on
-`status=open` cannot tell "the wisp I am running" from "a genuinely
-queued-next". When only the current wisp matches, `NEXT` resolves to it,
-the pour below is skipped, and step 3 then burns it — the witness ends the
-turn holding ZERO wisps and the patrol stalls until something external
-rebootstraps it (observed live 2026-09-17, pv-wisp-0k5). Resolve the current
-wisp FIRST and subtract it from the candidates.
+A patrol wisp can remain open after assignment, so query both statuses and
+include the wisps tier. Filter by title and ephemeral before selecting the
+newest. An empty assignee must never query all agents' wisps.
 ```bash
-THIS_WISP=${GC_BEAD_ID:-}
-if [ -z "$THIS_WISP" ]; then
-  THIS_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --include-infra --limit=1 --json | jq -r '.[0].id // empty')
+CURRENT_WISP=${GC_BEAD_ID:-}
+if [ -z "$CURRENT_WISP" ]; then
+  CURRENT_WISP=$(gc bd list --assignee="${GC_AGENT:?}" --status=open,in_progress --type=molecule --include-infra --limit=0 --json | jq -r '[.[] | select(.title == "mol-witness-patrol" and .ephemeral == true)] | sort_by(.created_at, .id) | last | .id // empty')
 fi
-if [ -z "$THIS_WISP" ]; then
-  echo "Could not resolve current witness wisp; not pouring and not burning."
-  gc runtime drain-ack
-  exit 1
-fi
-OPEN_WISPS=$(gc bd list --assignee="$GC_AGENT" --status=open --type=molecule --include-infra --limit=0 --json \
-  | jq -r --arg self "$THIS_WISP" '.[] | select(.id != $self) | .id')
-NEXT=$(printf '%s\n' $OPEN_WISPS | sed -n '1p')
-for extra in $(printf '%s\n' $OPEN_WISPS | sed '1d'); do
-  gc bd mol burn "$extra" --force
-done
-if [ -z "$NEXT" ]; then
-  NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{binding_prefix}}' --json | jq -r '.new_epic_id // empty')
-  if [ -z "$NEXT" ]; then
-    echo "Could not pour next witness wisp; not burning the current one."
-    gc runtime drain-ack
-    exit 1
+if [ -n "$CURRENT_WISP" ]; then
+  if gc bd mol burn "$CURRENT_WISP" --force; then
+    echo "Patrol cycle done: burned $CURRENT_WISP; ending turn until the next tick."
+  else
+    gc runtime request-restart
   fi
-fi
-# --status=in_progress is load-bearing: `gc bd mol wisp` pours at status=open
-# and --assignee alone does not transition it, so the next restart's resume
-# check (which filters status=in_progress) cannot see a wisp assigned without
-# it and startup pours a duplicate on top.
-if ! gc bd update "$NEXT" --assignee="$GC_AGENT" --status=in_progress; then
-  echo "Could not assign next witness wisp; not burning the current one."
-  gc runtime drain-ack
-  exit 1
+else
+  echo "Could not resolve current witness wisp; not burning."
+  gc runtime request-restart
 fi
 ```
 
-**3. Burn this wisp:**
-```bash
-gc bd mol burn "$THIS_WISP" --force
-```
+After a successful burn, end the turn and wait for the next tick. Do NOT pour
+a successor, do NOT call `gc runtime drain-ack`, and do NOT `exit`; the order
+owns the cadence. On failure request a restart so startup can adopt the wisp.
 
-**4. Exit this turn:**
-Write exactly:
-```
-IDLE: no work, exiting turn.
-```
-Then stop immediately. Do NOT sleep, call ScheduleWakeup, or use Monitor.
-The session_sleep policy will restart this session after the configured idle interval;
-the next wisp is already assigned and the restarted session resumes from it.
-
-**Exit criteria:** Next wisp poured, this wisp burned, turn ended with IDLE signal."""
+**Exit criteria:** This wisp burned and turn ended, or restart requested on failure; no successor poured."""

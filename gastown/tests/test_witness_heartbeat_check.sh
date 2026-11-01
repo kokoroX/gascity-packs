@@ -16,9 +16,10 @@ write_gc_stub() {
     mkdir -p "$bin"
     cat >"$bin/gc" <<'SH'
 #!/usr/bin/env sh
-# Only `gc session list --state=all --json` is exercised here.
 case "$*" in
     *"session"*"list"*"--json"*) cat "$GC_SESSIONS_JSON" ;;
+    'agent list --json') cat "$GC_AGENTS_JSON" ;;
+    'bd --rig '*' list '*) cat "$GC_WISPS_JSON" ;;
     *) printf '{}' ;;
 esac
 SH
@@ -35,7 +36,7 @@ run_check() {
     set +e
     # ${1+"$@"} rather than "$@": bash 3.2 under `set -u` treats an empty "$@"
     # as an unbound variable.
-    OUT=$(env GC_CITY="$CITY" GC_SESSIONS_JSON="$SESSIONS" PATH="$BIN:$PATH" ${1+"$@"} \
+    OUT=$(env GC_CITY="$CITY" GC_SESSIONS_JSON="$SESSIONS" GC_AGENTS_JSON="$AGENTS" GC_WISPS_JSON="$WISPS" PATH="$BIN:$PATH" ${1+"$@"} \
         bash "$SCRIPT" 2>"$ERRFILE")
     RC=$?
     set -e
@@ -53,6 +54,10 @@ trap 'rm -rf "$tmp"' EXIT
 CITY="$tmp/city"
 BIN="$tmp/bin"
 SESSIONS="$tmp/sessions.json"
+AGENTS="$tmp/agents.json"
+WISPS="$tmp/wisps.json"
+printf '%s\n' '{"agents":[]}' >"$AGENTS"
+printf '%s\n' '[]' >"$WISPS"
 ERRFILE="$tmp/stderr.txt"
 mkdir -p "$CITY"
 : >"$CITY/city.toml"
@@ -278,6 +283,9 @@ case "$*" in
     "session list --state=all --json")
         cat "$GC_SESSIONS_JSON"
         ;;
+    "agent list --json")
+        printf '%s\n' '{"agents":[]}'
+        ;;
     *)
         echo "unexpected gc invocation: $*" >&2
         exit 91
@@ -301,6 +309,20 @@ SH
         fail "pack-command dispatch should reach the heartbeat implementation, got: $OUT"
 }
 
+test_stale_assigned_wisp_without_session() {
+    printf '%s\n' '{"agents":[{"qualified_name":"alpha/worker.witness","suspended":false}]}' >"$AGENTS"
+    printf '[{"id":"fresh","title":"mol-witness-patrol","ephemeral":true,"created_at":"%s"},{"id":"old","title":"mol-witness-patrol","ephemeral":true,"created_at":"%s"},{"id":"other","title":"other","ephemeral":true,"created_at":"2000-01-01T00:00:00Z"}]\n' "$FRESH" "$STALE" >"$WISPS"
+    run_check '{"sessions":[]}'
+    [ "$RC" -eq 1 ] || fail "a stale assigned wisp without a session must exit 1, got $RC ($OUT)"
+    printf '%s' "$OUT" | grep -q "^stalled-wisp	alpha	alpha/worker.witness	no-session	7[0-9][0-9][0-9][0-9]	$STALE\$" ||
+        fail "the oldest assigned wisp should be reported, got: $OUT"
+    printf '%s\n' '[]' >"$WISPS"
+    run_check '{"sessions":[]}'
+    [ "$RC" -eq 0 ] && [ -z "$OUT" ] || fail "no assigned wisp must not be a finding: $RC ($OUT)"
+    printf '%s\n' '{"agents":[]}' >"$AGENTS"
+}
+
+test_stale_assigned_wisp_without_session
 test_fresh_heartbeat_is_not_flagged
 test_stale_heartbeat_is_stalled
 test_zero_time_sentinel_is_no_heartbeat_not_stalled

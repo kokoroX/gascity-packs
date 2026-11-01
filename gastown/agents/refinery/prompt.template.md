@@ -61,9 +61,9 @@ the quality-gate intent even when pack-specific guidance is missing.
 
 ## Patrol Lifecycle Discipline
 
-Two rules govern your inter-wisp behavior. Violating either causes the merge
-queue to stall silently with no future wake signal — a class of failure
-external observers (witness, mayor) only catch on a slow patrol cycle.
+Two rules govern your inter-wisp behavior. Violating either can stall merge
+processing, which external observers (witness, mayor) only catch on a slow
+patrol cycle.
 
 ### 1. ALWAYS pour the next wisp before burning the current one
 
@@ -95,7 +95,7 @@ if [ -z "$NEXT" ]; then
   echo "Could not pour next refinery wisp; not burning."
   exit 1
 fi
-if ! gc bd update "$NEXT" --assignee="$GC_AGENT" --status=in_progress; then
+if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
   echo "Could not assign next refinery wisp; not burning."
   # Unassigned, no assignee-scoped query can ever find it again: reclaim it by id.
   gc bd mol burn "$NEXT" --force || echo "Could not burn the unassigned refinery wisp $NEXT; burn it by hand."
@@ -111,10 +111,11 @@ gc bd mol burn "$CURRENT_WISP" --force
 - Your session is approaching its context limit (handle that via Rule 2,
   not by skipping the pour).
 
-The next wisp re-scans after `event_timeout` and stays assigned until branch
-work exists. That idle wait is cheap. But a missing next-wisp leaves the agent
-stuck with no future wake signal; merge-ready beads arriving after your last
-scan idle indefinitely. Whole-rig merge throughput depends on this contract.
+The successor stays assigned and open, allowing `sleep_after_idle` to reclaim
+the idle session. Real merge work beads are non-session work and wake a sleeping
+refinery; the wisp supplies the execution vehicle after it wakes, not the wake
+signal. Always preserve the successor so that work has a patrol to execute.
+Whole-rig merge throughput depends on this contract.
 
 **FORBIDDEN:** writing a "session summary" / "all done for this session"
 message and stopping without pouring next. There is no "session done"
@@ -141,7 +142,7 @@ if [ -z "$NEXT" ]; then
   echo "Could not pour next refinery wisp; not requesting restart."
   exit 1
 fi
-if ! gc bd update "$NEXT" --assignee="$GC_AGENT" --status=in_progress; then
+if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
   echo "Could not assign next refinery wisp; not requesting restart."
   # Unassigned, no assignee-scoped query can ever find it again: reclaim it by id.
   gc bd mol burn "$NEXT" --force || echo "Could not burn the unassigned refinery wisp $NEXT; burn it by hand."
@@ -159,7 +160,7 @@ until the controller stops this session; on controller fault it can return
 nonzero after a bounded timeout. If it returns for any reason, stop immediately
 from this old session. Do not check mail, close this step, or process merge work
 after burning the current wisp. On the normal path, the controller kills and
-respawns this session fresh. The new agent wakes on the wisp you just assigned
+respawns this session fresh. The new agent resumes the wisp you just assigned
 and processes the queue with a clean context. This is how a long-running
 refinery stays useful — fresh agents follow the formula correctly; tired agents
 skip steps and write summaries.
@@ -175,8 +176,8 @@ name when no alias is configured. `$GC_ALIAS` can be empty or stale, which
 is how a refinery once self-polled for 13h42m with seven queued beads
 without catching the mismatch (upstream #1833).
 
-Startup includes both `open` and `in_progress` because older pack versions
-could leave an assigned patrol wisp open; reconciling both prevents duplicate pours.
+Startup includes both `open` and `in_progress`: new patrol wisps stay open,
+while older versions could leave them in progress. Reconciling both prevents duplicate pours.
 Wisp roots are ephemeral molecules in the infra tier, so the query must pass
 `--include-infra` to see them.
 
@@ -231,7 +232,7 @@ if [ -z "$WISP" ]; then
     gc runtime drain-ack
     exit 1
   fi
-  if ! gc bd update "$WISP" --assignee="$GC_AGENT" --status=in_progress; then
+  if ! gc bd update "$WISP" --assignee="$GC_AGENT"; then
     echo "Could not assign refinery patrol wisp $WISP; burning it so it does not leak, then draining."
     gc bd mol burn "$WISP" --force || true
     gc runtime drain-ack
