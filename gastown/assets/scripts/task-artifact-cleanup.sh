@@ -76,7 +76,8 @@ if [ -z "$WORK" ]; then
               | select(
                   .metadata.merge_result == "merged" or
                   .metadata.merge_result == "already_merged" or
-                  .metadata.merge_result == "mr_merged"
+                  .metadata.merge_result == "mr_merged" or
+                  .metadata.merge_result == "mirror_pr_merged"
                 )
             ]
             | sort_by(.updated_at // "")
@@ -241,7 +242,7 @@ CLEANUP_STATE=$(printf '%s' "$META" | jq -r '.artifact_cleanup_state // empty')
 EXPECTED_ARTIFACT_SHA=$(printf '%s' "$META" |
     jq -r '.artifact_source_sha // empty')
 BRANCH=$(printf '%s' "$META" | jq -r '.branch // empty')
-TARGET=$(printf '%s' "$META" | jq -r '.merged_target // empty')
+TARGET=$(printf '%s' "$META" | jq -r '.merged_target // .target // empty')
 MERGED_SHA=$(printf '%s' "$META" | jq -r '.merged_sha // empty')
 PR_HEAD_SHA=$(printf '%s' "$META" | jq -r '.pr_head_sha // empty')
 PR_NUMBER=$(printf '%s' "$META" | jq -r '.pr_number // empty')
@@ -254,7 +255,7 @@ TASK_ARTIFACT=$(printf '%s' "$META" | jq -r '
 TERMINAL=false
 if [ "$STATUS" = closed ]; then
     case "$HANDOFF_RESULT" in
-        merged|already_merged|mr_merged)
+        merged|already_merged|mr_merged|mirror_pr_merged)
             TERMINAL=true
             ;;
     esac
@@ -432,7 +433,7 @@ case "$HANDOFF_RESULT" in
             exit 1
         fi
         ;;
-    merged|already_merged)
+    merged|already_merged|mirror_pr_merged)
         EXPECTED_BRANCH="polecat/$WORK"
         if [ "$BRANCH" != "$EXPECTED_BRANCH" ] ||
            ! valid_branch "$BRANCH" ||

@@ -15,10 +15,16 @@ preserves the existing assignee. The origin must be a local mirror repository:
 its `gc-pr-state/<work>.json` is written by the host mirror synchronizer. Older
 markers without an origin are claimed only when that state file exists.
 
-A missing file or open PR leaves the bead blocked. A merged PR closes it only
-when the file's work, branch, target and head match the handoff and the merge
-commit is reachable from the freshly fetched origin target. A closed-unmerged
-PR is routed to a human. Invalid or unreadable files never close the bead.
-After closure, branch deletion is retried through the durable marker and uses
-an exact-head lease to avoid deleting a branch that moved. The original task
-artifact is preserved.
+A missing file, open PR or closed PR is checked against the freshly fetched
+target: if the handoff head is reachable, the bead is marked merged. Otherwise
+missing and open PRs remain pending, and closed PRs are routed to a human.
+A merged state must match the handoff identity and its merge commit must be
+reachable from the freshly fetched target. Invalid or unreadable state is retried.
+
+A missing PR triggers one mayor notification after 7200 seconds by default;
+set `GC_MIRROR_PR_AWAIT_ALERT_SECONDS` to a non-negative integer to change it.
+An externally closed bead without merge evidence is escalated and its mirror
+branch is retained. After a verified merge, artifact cleanup and branch deletion
+are retried through the marker. For blocked cleanup, the marker remains until
+branch deletion and the mayor notification succeed; notification can repeat if
+clearing the marker fails. Branch deletion uses an exact-head lease.

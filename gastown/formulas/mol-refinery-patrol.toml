@@ -1176,8 +1176,9 @@ git checkout --detach "origin/$TARGET" >/dev/null 2>&1 || true
 git branch -d temp || git branch -D temp || true
 ```
 
-The bead and its dependents remain blocked. Reconciliation verifies the host's
-merge evidence before closing; task artifacts remain preserved at handoff.
+The bead and its dependents remain blocked. Reconciliation verifies target
+ancestry or the host's merge evidence before closing; after closure it cleans
+the task artifact and deletes the mirror branch.
 
 **If MERGE_STRATEGY = "mr":**
 

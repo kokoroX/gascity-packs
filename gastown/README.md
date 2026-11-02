@@ -74,14 +74,16 @@ arrives.
 
 With `mirror-pr`, refinery pushes the tested commit without force to the local
 mirror's `gc-pr/<target>/<work>` branch and blocks the bead. The host mirror
-synchronizer publishes the PR and writes `gc-pr-state/<work>.json` inside the
-bare origin. `gc gastown mirror-pr-reconcile` checks one pending handoff per
-work scan, verifies the recorded head and the merge commit's ancestry on the
-freshly fetched target, then closes the bead and deletes the mirror branch.
-Missing, open, invalid or unreadable state never closes the bead; a closed PR
-is routed to a human. The refinery needs no GitHub credentials for this mode.
-The task artifact is retained. Ensure the refinery is periodically awakened
-while mirror PRs are pending; blocked beads alone do not create session demand.
+synchronizer records PR state in `gc-pr-state/<work>.json` inside the bare
+origin. `gc gastown mirror-pr-reconcile` checks one pending handoff per work
+scan and closes it when the recorded head or a validated PR merge commit is
+reachable from the freshly fetched target. It cleans the task artifact and
+deletes the mirror branch, retrying transient failures. A closed PR without
+merge evidence is routed to a human; a missing PR triggers one mayor
+notification after two hours by default (`GC_MIRROR_PR_AWAIT_ALERT_SECONDS`
+changes the delay). The refinery needs no GitHub credentials for this mode.
+Ensure it is periodically awakened while mirror PRs are pending; blocked beads
+alone do not create session demand.
 
 This contract applies to new handoffs. An upgrade does not reopen legacy beads
 that an older pack already closed at PR publication; operators should audit
