@@ -40,11 +40,8 @@ Merge strategy is per-work-bead metadata:
 - `direct` (default): fast-forward merge to target and push
 - `mr` / `pr`: publish a GitHub pull request instead of landing directly
 
-When the work bead does not set a non-empty `metadata.merge_strategy`, a
-non-empty `GC_MERGE_STRATEGY_DIRECT_TARGETS` space-separated glob list selects
-`direct` when `$TARGET` matches any entry. Otherwise, a non-empty
-`GC_MERGE_STRATEGY_DEFAULT` overrides the formula's `default_merge_strategy`;
-if neither environment rule applies, the formula default applies.
+Merge strategy is determined only by `gc gastown merge-strategy`; run it and
+do not infer the strategy from environment variables or configuration.
 
 In `mr` mode, PR publication is not completion. Refinery records the
 verified PR identity and head on the work bead, then leaves the bead
@@ -687,73 +684,33 @@ needs = ["handle-failures"]
 description = """
 **Config: target_branch = {{target_branch}}**
 **Config: default_merge_strategy = {{default_merge_strategy}}**
-**Merge strategy precedence: non-empty bead `metadata.merge_strategy` >
-matching `$TARGET` in non-empty agent env `GC_MERGE_STRATEGY_DIRECT_TARGETS`
-(space-separated globs; selects `direct`) > non-empty agent env
-`GC_MERGE_STRATEGY_DEFAULT` > formula `default_merge_strategy`
-({{default_merge_strategy}}).**
+**Run `gc gastown merge-strategy` as the sole authority for the strategy;
+do not infer it from environment variables or configuration.**
 **Config (deprecated; no effect on successful handoffs):
 delete_merged_branches = {{delete_merged_branches}}**
 
 Read the merge target and merge strategy from the work bead metadata:
 ```bash
 BRANCH=$(gc bd show $WORK --json | jq -r '.[0].metadata.branch')
-TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_branch}}"')
+TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // empty')
+TARGET=${TARGET:-{{target_branch}}}
 # BEGIN MERGE_STRATEGY_RESOLUTION
-WORK_METADATA=$(gc bd show "$WORK" --json | jq -c '.[0].metadata // {}')
-BEAD_MERGE_STRATEGY=$(printf '%s\n' "$WORK_METADATA" | jq -r '.merge_strategy // empty')
-MERGE_STRATEGY_SOURCE=""
-if [ -n "$BEAD_MERGE_STRATEGY" ]; then
-  MERGE_STRATEGY="$BEAD_MERGE_STRATEGY"
-  MERGE_STRATEGY_SOURCE="metadata.merge_strategy"
-else
-  MERGE_STRATEGY=""
-  DIRECT_TARGETS="${GC_MERGE_STRATEGY_DIRECT_TARGETS:-}"
-  if [ -n "$DIRECT_TARGETS" ]; then
-    set -f
-    for DIRECT_TARGET_PATTERN in $DIRECT_TARGETS; do
-      case "$TARGET" in
-        $DIRECT_TARGET_PATTERN)
-          MERGE_STRATEGY="direct"
-          MERGE_STRATEGY_SOURCE="target $TARGET matched GC_MERGE_STRATEGY_DIRECT_TARGETS"
-          break
-          ;;
-      esac
-    done
-    set +f
-  fi
-  if [ -z "$MERGE_STRATEGY" ]; then
-    if [ -n "${GC_MERGE_STRATEGY_DEFAULT:-}" ]; then
-      MERGE_STRATEGY="$GC_MERGE_STRATEGY_DEFAULT"
-      MERGE_STRATEGY_SOURCE="GC_MERGE_STRATEGY_DEFAULT"
-    else
-      MERGE_STRATEGY="{{default_merge_strategy}}"
-      MERGE_STRATEGY_SOURCE="default_merge_strategy"
-    fi
-  fi
+STRATEGY_ERROR_FILE=$(mktemp)
+if ! MERGE_STRATEGY=$(gc gastown merge-strategy "$WORK" --target "$TARGET" --default "{{default_merge_strategy}}" 2>"$STRATEGY_ERROR_FILE"); then
+  STRATEGY_ERROR=$(cat "$STRATEGY_ERROR_FILE")
+  rm -f "$STRATEGY_ERROR_FILE"
+  echo "STOP. Could not resolve merge strategy for $WORK targeting $TARGET: $STRATEGY_ERROR"
+  gc mail send mayor/ -s "ESCALATION: merge_strategy resolution for $WORK" -m "Work bead: $WORK
+Target: $TARGET
+$STRATEGY_ERROR"
+  gc runtime drain-ack
+  exit 1
 fi
-echo "merge strategy: $MERGE_STRATEGY (from $MERGE_STRATEGY_SOURCE)"
-case "$MERGE_STRATEGY" in
-  direct|mr|pr|mirror-pr) ;;
-  *)
-    echo "Invalid merge strategy '$MERGE_STRATEGY' (from $MERGE_STRATEGY_SOURCE). Expected direct, mr, pr, or mirror-pr. STOP. Do not mutate bead state."
-    gc mail send mayor/ -s "ESCALATION: invalid merge_strategy for $WORK" -m "Work bead: $WORK
-Resolved merge strategy: $MERGE_STRATEGY
-Expected one of: direct, mr, pr, or mirror-pr.
-Source: $MERGE_STRATEGY_SOURCE."
-    gc runtime drain-ack
-    exit 1
-    ;;
-esac
+cat "$STRATEGY_ERROR_FILE" >&2
+rm -f "$STRATEGY_ERROR_FILE"
+echo "merge strategy: $MERGE_STRATEGY"
 # END MERGE_STRATEGY_RESOLUTION
 EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')
-if [ "$MERGE_STRATEGY" = "pr" ]; then
-  MERGE_STRATEGY="mr"
-fi
-if [ -n "$EXISTING_PR" ] && [ "$MERGE_STRATEGY" = "direct" ]; then
-  echo "metadata.existing_pr requires pull-request handoff; using merge_strategy=mr."
-  MERGE_STRATEGY="mr"
-fi
 ORIGIN_REPO=""
 ORIGIN_REPO_ERROR=""
 if [ "$MERGE_STRATEGY" != "mirror-pr" ] && command -v gh >/dev/null 2>&1; then
