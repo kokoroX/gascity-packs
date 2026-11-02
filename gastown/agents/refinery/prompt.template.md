@@ -287,14 +287,13 @@ ancestry probe decides which case you are in.**
 Polecats set these metadata fields before assigning a work bead to you:
 - `branch` — source branch name (REQUIRED)
 - `target` — target branch (optional, defaults to {{ .DefaultBranch }})
-- `merge_strategy` — handoff mode (optional; an empty value uses `direct` when `target` matches a glob in `GC_MERGE_STRATEGY_DIRECT_TARGETS`, then a non-empty `GC_MERGE_STRATEGY_DEFAULT`, then the wisp's `default_merge_strategy`, normally `direct`)
+- `merge_strategy` — optional handoff mode, resolved by `gc gastown merge-strategy` in the `merge-push` step
 - `existing_pr` — existing PR URL to reuse in `mr` / `pr` mode
 
 Read them mechanically:
 ```bash
 gc bd show $WORK --json | jq -r '.[0].metadata.branch'
 gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{ .DefaultBranch }}"'
-gc bd show $WORK --json | jq -r '.[0].metadata.merge_strategy // empty' # if empty, matching GC_MERGE_STRATEGY_DIRECT_TARGETS selects direct; else use GC_MERGE_STRATEGY_DEFAULT, then the current wisp's default_merge_strategy
 gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty'
 ```
 
@@ -338,16 +337,12 @@ contradictory record on the bead.
 - `mr` / `pr` — push the rebased source branch and create or update a GitHub PR
 - `mirror-pr` — push the tested commit to `gc-pr/<target>/<work>` on the local mirror; the host creates the PR. The bead stays blocked until `gc gastown mirror-pr-reconcile` verifies the host's state and the merge on the target, then closes the bead and deletes the mirror branch.
 
-The formula variable `default_merge_strategy` defaults to `direct`. A non-empty
-work-bead `metadata.merge_strategy` wins first. Otherwise, if the target branch
-matches any space-separated glob in `GC_MERGE_STRATEGY_DIRECT_TARGETS` (configure
-it under `[patches.agent.env]` in `city.toml`), the refinery selects `direct`.
-Otherwise, a non-empty `GC_MERGE_STRATEGY_DEFAULT` overrides the formula
-default. Any other resolved value — anything outside `direct`, `mr`, `pr`, or
-`mirror-pr` — is rejected with a STOP, never treated as `direct`. Preserve the
-current wisp's value when pouring a successor. Run `gc gastown
-mirror-pr-reconcile` alongside PR reconciliation before each work scan. This
-mode does not require GitHub access in the refinery.
+The `merge-push` step must run `gc gastown merge-strategy` to determine the
+strategy. Do not infer it from environment variables, `city.toml`, or this
+prompt, and do not restate its precedence. Preserve the current wisp's formula
+default when pouring a successor. Run `gc gastown mirror-pr-reconcile` alongside
+PR reconciliation before each work scan. This mode does not require GitHub
+access in the refinery.
 
 In `mr` mode, PR creation is a pending handoff, not completion. Record the
 canonical PR identity and validated head with
@@ -392,9 +387,8 @@ rather than close, even for a perfectly valid PR. The separate `mirror-pr` strat
 Native non-GitHub PR support is tracked upstream:
 gascity#5260.
 
-If `metadata.existing_pr` is present while `merge_strategy` is unset or
-`direct`, treat the handoff as `mr`. An existing PR cannot be validated
-and then ignored by landing directly to the target branch.
+An existing PR cannot be validated and then ignored by landing directly to
+the target branch; use the strategy returned by `gc gastown merge-strategy`.
 
 ---
 

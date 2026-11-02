@@ -41,7 +41,8 @@ empty, a target branch matching a space-separated glob in
 `GC_MERGE_STRATEGY_DIRECT_TARGETS` (set under `[patches.agent.env]` in
 `city.toml`) selects `direct`. Otherwise, a non-empty
 `GC_MERGE_STRATEGY_DEFAULT` overrides the formula default. An invalid strategy
-value stops the merge rather than falling back to `direct`.
+value stops the merge rather than falling back to `direct`. Resolution is performed
+by `gc gastown merge-strategy`.
 In direct mode refinery lands the
 branch on the target and closes the bead after verifying the remote target.
 With `mr` / `pr`, refinery publishes a GitHub pull request and records a
