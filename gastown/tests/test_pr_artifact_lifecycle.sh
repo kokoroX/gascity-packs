@@ -630,6 +630,16 @@ test_real_git_deleted_head_branch_uses_pull_head_ref() {
         fail "blocked cleanup must release the reconciliation slot"
 }
 
+test_mirror_merge_sweep() {
+    setup_case mirror-sweep
+    jq --arg sha "$TASK_SHA" '.[0].status = "closed" | .[0].metadata.merge_result = "mirror_pr_merged" | .[0].metadata.merged_sha = $sha | .[0].metadata.artifact_cleanup_state = "pending"' "$STATE" >"$STATE.next"
+    mv "$STATE.next" "$STATE"
+    "$CLEANUP"
+    [ ! -e "$ARTIFACT" ] || fail 'mirror merge sweep did not remove artifact'
+    [ "$(jq -r '.[0].metadata.artifact_cleanup_state' "$STATE")" = complete ] || fail 'mirror sweep did not complete'
+}
+
+test_mirror_merge_sweep
 test_publication_arms_without_premature_cleanup_then_converges
 test_closed_legacy_pull_request_is_not_terminal
 test_real_git_merge_shapes_close_only_when_landed

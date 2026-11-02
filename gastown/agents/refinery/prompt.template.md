@@ -335,7 +335,7 @@ contradictory record on the bead.
 
 - `direct` — merge to target and push normally
 - `mr` / `pr` — push the rebased source branch and create or update a GitHub PR
-- `mirror-pr` — push the tested commit to `gc-pr/<target>/<work>` on the local mirror; the host creates the PR. The bead stays blocked until `gc gastown mirror-pr-reconcile` verifies the host's state and the merge on the target, then closes the bead and deletes the mirror branch.
+- `mirror-pr` — push the tested commit to `gc-pr/<target>/<work>` on the local mirror. The host opens the PR; `gc gastown mirror-pr-reconcile` verifies target ancestry or a merged PR state, closes the bead, cleans the artifact and deletes the mirror branch. A missing PR receives a timed mayor notification.
 
 The `merge-push` step must run `gc gastown merge-strategy` to determine the
 strategy. Do not infer it from environment variables, `city.toml`, or this

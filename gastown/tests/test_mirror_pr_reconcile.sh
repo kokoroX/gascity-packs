@@ -35,8 +35,35 @@ printf '\n' >>"$GC_TEST_LOG"
 case "$1:$2" in
   bd:list) cat "$GC_TEST_LIST" ;;
   bd:update)
-    case " $* " in *" ${GC_TEST_FAIL_WORK:-__no_failure__} "*) exit 1 ;; esac ;;
-  bd:close|mail:send) : ;;
+    case " $* " in *" ${GC_TEST_FAIL_WORK:-__no_failure__} "*) exit 1 ;; esac
+    shift 2
+    case "${1:-}" in --rig=*) shift ;; esac
+    work=$1
+    shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --set-metadata)
+          key=${2%%=*}; value=${2#*=}
+          jq --arg work "$work" --arg key "$key" --arg value "$value" 'map(if .id == $work then .metadata[$key] = $value else . end)' "$GC_TEST_LIST" >"$GC_TEST_LIST.tmp"
+          mv "$GC_TEST_LIST.tmp" "$GC_TEST_LIST"
+          shift 2 ;;
+        --unset-metadata)
+          jq --arg work "$work" --arg key "$2" 'map(if .id == $work then del(.metadata[$key]) else . end)' "$GC_TEST_LIST" >"$GC_TEST_LIST.tmp"
+          mv "$GC_TEST_LIST.tmp" "$GC_TEST_LIST"
+          shift 2 ;;
+        *) shift ;;
+      esac
+    done ;;
+  bd:show) cat "$GC_TEST_LIST" ;;
+  gastown:task-artifact-cleanup)
+    if [ "${GC_TEST_CLEANUP_BLOCKED:-0}" = 1 ]; then
+      jq '.[0].metadata.artifact_cleanup_state = "blocked"' "$GC_TEST_LIST" >"$GC_TEST_LIST.tmp"
+      mv "$GC_TEST_LIST.tmp" "$GC_TEST_LIST"
+      exit 1
+    fi
+    [ "${GC_TEST_CLEANUP_FAIL:-0}" = 0 ] ;;
+  bd:close) : ;;
+  mail:send) [ "${GC_TEST_MAIL_FAIL:-0}" = 0 ] ;;
   *) exit 90 ;;
 esac
 SH
@@ -57,11 +84,30 @@ no_close() { ! grep -F 'gc <bd> <close>' "$GC_TEST_LOG" >/dev/null || fail 'unex
 contains() { grep -F "$1" "$GC_TEST_LOG" >/dev/null || fail "missing call: $1"; }
 
 reset_case
+git -C "$TMP/seed" checkout -q -b integration origin/main
+git -C "$TMP/seed" merge -q --no-ff -m integration "$HEAD_SHA"
+git -C "$TMP/seed" push -q origin HEAD:refs/heads/main
+sh "$COMMAND"
+contains 'gc <bd> <close>'
+contains '<merge_result=mirror_pr_merged>'
+contains '<merged_via=ancestry>'
+contains 'gc <gastown> <task-artifact-cleanup> <work-1>'
+[ "$(jq -r '.[0].metadata.mirror_pr_reconcile_pending // empty' "$GC_TEST_LIST")" = '' ] || fail 'ancestry merge retained marker'
+if git -C "$TMP/origin.git" show-ref --verify --quiet refs/heads/gc-pr/main/work-1; then
+    fail 'ancestry merge did not delete mirror branch'
+fi
+git -C "$TMP/seed" push -q --force origin origin/main~1:refs/heads/main
+git -C "$TMP/seed" push -q origin "$HEAD_SHA:refs/heads/gc-pr/main/work-1"
+
+reset_case
 sh "$COMMAND"
 no_close
+git -C "$TMP/origin.git" show-ref --verify --quiet refs/heads/gc-pr/main/work-1 || fail 'unmerged mirror branch deleted'
 write_state open "$HEAD_SHA" ''
-sh "$COMMAND"
+sh "$COMMAND" >"$TMP/open-output"
 no_close
+grep -F 'PENDING: work-1 — mirror PR is open.' "$TMP/open-output" >/dev/null || fail 'open PR did not remain pending'
+git -C "$TMP/origin.git" show-ref --verify --quiet refs/heads/gc-pr/main/work-1 || fail 'open PR mirror branch deleted'
 contains '<pr_url=https://example.invalid/pr/1>'
 
 reset_case
@@ -98,6 +144,42 @@ if git -C "$TMP/origin.git" show-ref --verify --quiet refs/heads/gc-pr/main/work
     fail 'merged mirror branch not deleted'
 fi
 
+reset_case
+git -C "$TMP/seed" push -q origin "$HEAD_SHA:refs/heads/gc-pr/main/work-1"
+jq '.[0].status = "closed"' "$GC_TEST_LIST" >"$TMP/next.json"
+mv "$TMP/next.json" "$GC_TEST_LIST"
+sh "$COMMAND"
+no_close
+contains '<merge_result=mirror_pr_merged>'
+contains '<merged_via=ancestry>'
+contains 'gc <gastown> <task-artifact-cleanup> <work-1>'
+[ "$(jq -r '.[0].metadata.mirror_pr_reconcile_pending // empty' "$GC_TEST_LIST")" = '' ] || fail 'closed merged marker retained'
+if git -C "$TMP/origin.git" show-ref --verify --quiet refs/heads/gc-pr/main/work-1; then
+    fail 'closed merged branch not deleted'
+fi
+
+reset_case
+git -C "$TMP/seed" push -q origin "$HEAD_SHA:refs/heads/gc-pr/main/work-1"
+git -C "$TMP/seed" push -q --force origin origin/main~1:refs/heads/main
+jq '.[0].status = "closed"' "$GC_TEST_LIST" >"$TMP/next.json"
+mv "$TMP/next.json" "$GC_TEST_LIST"
+sh "$COMMAND"
+no_close
+contains '<mirror_pr_error=closed externally without merge evidence; mirror branch left>'
+contains 'gc <mail> <send> <mayor/>'
+git -C "$TMP/origin.git" show-ref --verify --quiet refs/heads/gc-pr/main/work-1 || fail 'unmerged branch deleted'
+
+reset_case
+export GC_MIRROR_PR_AWAIT_ALERT_SECONDS=0
+sh "$COMMAND"
+sh "$COMMAND"
+[ "$(grep -c 'gc <mail> <send>' "$GC_TEST_LOG")" = 1 ] || fail 'alert was not sent exactly once'
+[ -n "$(jq -r '.[0].metadata.mirror_pr_alerted_at // empty' "$GC_TEST_LIST")" ] || fail 'missing alert timestamp'
+export GC_MIRROR_PR_AWAIT_ALERT_SECONDS=invalid
+if sh "$COMMAND"; then fail 'invalid alert threshold accepted'; fi
+unset GC_MIRROR_PR_AWAIT_ALERT_SECONDS
+
+git -C "$TMP/seed" push -q origin "$HEAD_SHA:refs/heads/main"
 reset_case
 sh "$COMMAND" record work-1 main "$HEAD_SHA"
 contains "<mirror_pr_origin=$TMP/origin.git>"
@@ -151,7 +233,35 @@ contains '<c-open>'
 ! grep -F '<--assignee=' "$GC_TEST_LOG" >/dev/null || fail 'batch changed assignee'
 grep -F 'FAILED: a-fail' "$TMP/all-output" >/dev/null || fail 'missing failed result'
 grep -F 'MERGED: closed b-merged' "$TMP/all-output" >/dev/null || fail 'missing merged result'
-grep -F 'PENDING: c-open' "$TMP/all-output" >/dev/null || fail 'missing open result'
+grep -F 'MERGED: closed c-open' "$TMP/all-output" >/dev/null || fail 'missing ancestry result'
 [ "$(wc -l <"$TMP/all-output" | tr -d ' ')" = 3 ] || fail 'expected one result line per bead'
+
+reset_case
+jq '.[0].status = "closed" | .[0].metadata.merge_result = "mirror_pr_merged"' "$GC_TEST_LIST" >"$TMP/next.json"
+mv "$TMP/next.json" "$GC_TEST_LIST"
+export GC_TEST_CLEANUP_BLOCKED=1 GC_TEST_MAIL_FAIL=1
+if sh "$COMMAND"; then fail 'failed notification accepted'; fi
+[ "$(jq -r '.[0].metadata.mirror_pr_reconcile_pending // empty' "$GC_TEST_LIST")" = true ] || fail 'failed notification cleared marker'
+unset GC_TEST_MAIL_FAIL
+if sh "$COMMAND"; then fail 'blocked cleanup accepted'; fi
+unset GC_TEST_CLEANUP_BLOCKED
+contains 'gc <mail> <send> <mayor/>'
+[ -z "$(jq -r '.[0].metadata.mirror_pr_reconcile_pending // empty' "$GC_TEST_LIST")" ] || fail 'blocked cleanup retained marker'
+if git -C "$TMP/origin.git" show-ref --verify --quiet refs/heads/gc-pr/main/work-1; then
+    fail 'blocked cleanup left the mirror branch'
+fi
+
+git -C "$TMP/seed" push -q --force origin origin/main~1:refs/heads/main
+reset_case
+jq --arg origin "$TMP/origin.git" --arg head "$HEAD_SHA" '
+  [{id:"a-closed",status:"closed",metadata:{merge_strategy:"mirror-pr",merge_result:"mirror_pr_merged",target:"main",pr_branch:"gc-pr/main/a-closed",pr_head:$head,mirror_pr_reconcile_pending:"true",mirror_pr_origin:$origin}},
+   {id:"b-blocked",status:"blocked",metadata:{merge_strategy:"mirror-pr",merge_result:"pull_request_pending",target:"main",pr_branch:"gc-pr/main/b-blocked",pr_head:$head,mirror_pr_reconcile_pending:"true",mirror_pr_origin:$origin}}]' "$GC_TEST_LIST" >"$TMP/next.json"
+mv "$TMP/next.json" "$GC_TEST_LIST"
+export GC_TEST_CLEANUP_FAIL=1
+if sh "$COMMAND"; then fail 'cleanup failure accepted'; fi
+unset GC_TEST_CLEANUP_FAIL
+sh "$COMMAND" >"$TMP/starvation-output"
+grep -F 'PENDING: b-blocked' "$TMP/starvation-output" >/dev/null || fail 'failed closed bead starved the blocked bead'
+! grep -F 'gc <bd> <close>' "$GC_TEST_LOG" >/dev/null || fail 'blocked bead was closed while unmerged'
 
 printf 'Mirror PR reconciliation tests passed\n'
