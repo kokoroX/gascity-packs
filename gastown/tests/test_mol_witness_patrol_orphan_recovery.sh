@@ -74,6 +74,9 @@ write_gc_stub() {
 # accepts beads literals that read as `gc bd ...`.
 invocation="gc $*"
 case "$invocation" in
+    "gc gastown witness-liveness-map")
+        GC_PACK_DIR="$GC_TEST_ROOT/gastown" exec "$GC_TEST_ROOT/gastown/commands/witness-liveness-map/run.sh"
+        ;;
     *"gc session list"*)
         if [ -n "${GC_STUB_FAIL_SESSION_LIST:-}" ]; then exit 1; fi
         cat "$GC_SESSIONS_JSON"
@@ -92,6 +95,7 @@ SH
 
 write_gc_stub
 export PATH="$BIN:$PATH"
+export GC_TEST_ROOT="$ROOT"
 export GC_SESSIONS_JSON="$tmp/sessions.json"
 export GC_SESSION_BEADS_JSON="$tmp/session-beads.json"
 export GC_BEAD_JSON="$tmp/bead.json"

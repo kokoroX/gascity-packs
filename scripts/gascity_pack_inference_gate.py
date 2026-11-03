@@ -159,7 +159,7 @@ GASTOWN_BUILD_WORKFLOW_CONTRACTS = {
         "closure happens only in",
     ),
     "mol-witness-patrol": (
-        "LIVENESS_MAP=$(jq -n",
+        "gc gastown witness-liveness-map",
         "FAIL-SAFE: empty liveness map",
         'git push origin "HEAD:refs/heads/$BRANCH"',
         "gc workflow delete-source <bead> --apply && gc workflow reopen-source <bead>",
@@ -1652,6 +1652,7 @@ def initialize_city(
         )
     if pack_spec.gastown and should_validate_gastown_orchestration_contract(gates):
         validate_gastown_orchestration_contract(pack_spec.source)
+        validate_witness_liveness_map_contract(pack_spec.source)
         validate_polecat_base_ref_contract(pack_spec.source)
     else:
         validate_methodology_flow_contract(pack_spec)
@@ -3066,6 +3067,23 @@ def list_values(value: Any) -> list[Any]:
     if value is None:
         return []
     return [value]
+
+
+def validate_witness_liveness_map_contract(pack_source: Path) -> None:
+    path = pack_source / "assets" / "scripts" / "witness-liveness-map.sh"
+    if not path.is_file():
+        raise GateError(f"Witness liveness map contract drifted: missing {path}")
+    text = path.read_text(encoding="utf-8", errors="replace")
+    # The map build itself must keep iterating the roster envelope, large
+    # inputs must stay off argv, and named identities on session beads must
+    # participate in the destructive guard.
+    for fragment in (
+        "reduce ($sessions[0].sessions // [])[] as $s",
+        "--slurpfile",
+        "configured_named_identity",
+    ):
+        if fragment not in text:
+            raise GateError(f"Witness liveness map contract drifted: missing {fragment!r}")
 
 
 def validate_gastown_orchestration_contract(pack_source: Path) -> None:
