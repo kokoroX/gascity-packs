@@ -214,7 +214,11 @@ GASTOWN_BUILD_WORKFLOW_CONTRACTS = {
         "Work-layer health",
         "queue-starvation-check",
         "gc gastown deacon-dolt-health",
-        "gc agents list --json --active",
+        # The active-session query. It used to be `gc agents list --json
+        # --active`, which does not exist; 2dbb43b replaced it with one session
+        # listing piped through jq so the per-cycle context stays small. Pin the
+        # query the formula actually runs, verbatim.
+        "gc session list --json | jq -r '[(.sessions // [])[] | select(.closed | not) | .agent_name] | unique | .[]'",
         "gc bd create --type=task --labels=warrant",
         "\"gc.routed_to\":\"{{binding_prefix}}dog\"",
     ),

@@ -173,6 +173,15 @@ GC_LINT_DIAGNOSTIC = re.compile(
 )
 
 
+def is_pack_shell_test(relative: Path) -> bool:
+    return (
+        len(relative.parts) >= 3
+        and relative.parts[0] != "tests"
+        and relative.parts[1] == "tests"
+        and relative.suffix == ".sh"
+    )
+
+
 def tracked_files() -> list[Path]:
     result = subprocess.run(
         ["git", "ls-files", "-z"],
@@ -240,8 +249,14 @@ def intentional_gc_lint_verbatim(relative: Path, line: str) -> bool:
 
 
 def bare_bd_violations(path: Path, text: str) -> list[str]:
-    violations = []
     relative = path.relative_to(REPO_ROOT)
+    # Pack tests run only in development and CI, with gc stubbed; matching
+    # their captured argv literals by line would either miss new forms or
+    # weaken the runtime asset check. The city never executes <pack>/tests/.
+    if is_pack_shell_test(relative):
+        return []
+
+    violations = []
     for line_number, line in enumerate(text.splitlines(), start=1):
         for pattern in (BARE_BD_COMMAND, BARE_BD_LEADING_FLAG, BARE_BD_DYNAMIC_COMMAND):
             for match in pattern.finditer(line):
@@ -284,6 +299,26 @@ def test_shipped_pack_assets_route_beads_commands_through_gc() -> None:
         violations.extend(bare_bd_violations(path, text))
 
     assert not violations, "bare bd commands bypass store-aware routing:\n" + "\n".join(violations)
+
+
+def test_detector_exempts_only_pack_shell_tests() -> None:
+    source = "bd list --json"
+
+    for relative in (
+        Path("gastown/assets/scripts/x.sh"),
+        Path("gastown/commands/x/run.sh"),
+        Path("gastown/formulas/x.toml"),
+        Path("tests/x.sh"),
+    ):
+        assert bare_bd_violations(REPO_ROOT / relative, source)
+    assert bare_bd_violations(REPO_ROOT / "gastown/tests/x.py", "# " + source)
+
+    assert not bare_bd_violations(
+        REPO_ROOT / "gastown/tests/test_x.sh", source
+    )
+    assert not bare_bd_violations(
+        REPO_ROOT / "gastown/tests/test_x.sh", "'bd list '*)"
+    )
 
 
 def test_detector_covers_shell_multiline_and_serialized_argv_forms() -> None:

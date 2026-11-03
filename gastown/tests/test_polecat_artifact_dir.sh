@@ -313,7 +313,7 @@ test_worktree_setup_ignores_gc_without_mutating_tracked_or_global_ignores() {
         fail "existing-worktree fast path did not restore exactly one .gc/ entry"
 }
 
-test_worktree_sync_ignores_codex_skills_but_rejects_unrelated_dirt() {
+test_worktree_sync_ignores_codex_skills_but_preserves_unrelated_dirt() {
     local tmp rig remote city provider skill_root exclude head_before status stderr
     tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' RETURN
@@ -355,18 +355,23 @@ test_worktree_sync_ignores_codex_skills_but_rejects_unrelated_dirt() {
     [[ "$(grep -cxF '.agents/skills/' "$exclude")" -eq 1 ]] ||
         fail "repository-local exclude does not contain exactly one .agents/skills/ entry"
 
-    # The targeted runtime exclude must not weaken the fail-closed guard for
-    # unrelated source dirt.
+    # The targeted runtime exclude must not weaken the dirty check for
+    # unrelated source dirt. A dirty provider is detected and preserved: sync
+    # leaves the worktree and its HEAD alone, reports it, and exits 0 so the
+    # session can start and assess the work (26a6b04) -- a non-zero pre_start is
+    # invisible to the agent and makes the controller retry forever.
     head_before=$(git -C "$provider" rev-parse HEAD)
     printf '%s\n' 'preserve me' >"$provider/dirty.txt"
     set +e
     "$WORKTREE_SETUP" "$rig" "$provider" refinery --sync 2>"$stderr"
     status=$?
     set -e
-    [[ "$status" -ne 0 ]] ||
-        fail "strict sync accepted unrelated provider worktree dirt"
-    grep -qF "refusing to sync dirty provider worktree at $provider" "$stderr" ||
-        fail "dirty sync did not report the fail-closed refusal"
+    [[ "$status" -eq 0 ]] ||
+        fail "dirty provider sync failed pre_start instead of starting without sync (rc=$status)"
+    grep -qF "worktree-setup: provider worktree at $provider is dirty" "$stderr" ||
+        fail "dirty sync did not report the refused sync"
+    grep -qF 'starting without sync' "$stderr" ||
+        fail "dirty sync did not report starting without sync"
     [[ -f "$provider/dirty.txt" ]] ||
         fail "dirty sync discarded unrelated provider worktree dirt"
     [[ "$(git -C "$provider" rev-parse HEAD)" == "$head_before" ]] ||
@@ -375,7 +380,7 @@ test_worktree_sync_ignores_codex_skills_but_rejects_unrelated_dirt() {
 
 test_worktree_sync_preserves_task_state_and_only_fast_forwards_stable_branch() {
     local tmp rig remote city provider stable hash task_sha detached_sha
-    local stable_sha foreign foreign_head foreign_exclude_before status
+    local stable_sha foreign foreign_head foreign_exclude_before status stderr
     tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' RETURN
     rig="$tmp/rig"
@@ -437,41 +442,49 @@ test_worktree_sync_preserves_task_state_and_only_fast_forwards_stable_branch() {
         fail "ref-reachable detached state was not preserved"
 
     # An unreferenced detached commit is the only durable copy of its work.
-    # Sync must fail without switching or rewriting it.
+    # Sync must skip and leave it untouched (26a6b04: a non-zero pre_start is
+    # invisible to the agent and makes the controller retry forever).
     git -C "$provider" checkout -q --detach
     printf 'detached unique\n' >"$provider/detached.txt"
     git -C "$provider" add detached.txt
     git -C "$provider" commit -qm "detached unique"
     detached_sha=$(git -C "$provider" rev-parse HEAD)
+    stderr="$tmp/detached.stderr"
     set +e
-    "$WORKTREE_SETUP" "$rig" "$provider" gastown.nux --sync
+    "$WORKTREE_SETUP" "$rig" "$provider" gastown.nux --sync 2>"$stderr"
     status=$?
     set -e
-    [[ "$status" -ne 0 ]] ||
-        fail "sync accepted an unreferenced detached provider HEAD"
+    [[ "$status" -eq 0 ]] ||
+        fail "sync failed pre_start on an unreferenced detached provider HEAD (rc=$status)"
+    grep -qF 'starting without sync' "$stderr" ||
+        fail "detached sync did not report starting without sync"
     [[ "$(git -C "$provider" rev-parse HEAD)" == "$detached_sha" ]] ||
-        fail "failed detached sync rewrote the unique HEAD"
+        fail "skipped detached sync rewrote the unique HEAD"
     [[ -z "$(git -C "$provider" branch --show-current)" ]] ||
-        fail "failed detached sync switched away from the unique HEAD"
+        fail "skipped detached sync switched away from the unique HEAD"
 
     # Give the test-only detached commit a durable ref, then verify dirty
-    # source state also blocks before any checkout or branch movement.
+    # source state is detected and preserved before any checkout or branch
+    # movement -- also without failing pre_start.
     git -C "$rig" branch audit-detached-preserved "$detached_sha"
     git -C "$provider" checkout -q "$stable"
     stable_sha=$(git -C "$provider" rev-parse HEAD)
     printf 'dirty\n' >"$provider/dirty.txt"
+    stderr="$tmp/dirty.stderr"
     set +e
-    "$WORKTREE_SETUP" "$rig" "$provider" gastown.nux --sync
+    "$WORKTREE_SETUP" "$rig" "$provider" gastown.nux --sync 2>"$stderr"
     status=$?
     set -e
-    [[ "$status" -ne 0 && -f "$provider/dirty.txt" ]] ||
-        fail "sync accepted or discarded dirty provider work"
+    [[ "$status" -eq 0 && -f "$provider/dirty.txt" ]] ||
+        fail "dirty sync did not preserve dirty provider work (rc=$status)"
+    grep -qF 'starting without sync' "$stderr" ||
+        fail "dirty sync did not report starting without sync"
     [[ "$(git -C "$provider" rev-parse HEAD)" == "$stable_sha" ]] ||
         fail "dirty sync moved the stable branch"
     rm -f "$provider/dirty.txt"
 
     # Unique/diverged work on the stable branch is not infrastructure state;
-    # preserve it for recovery instead of rebasing or resetting it.
+    # preserve it for recovery instead of rebasing or resetting it, and start.
     printf 'stable unique\n' >"$provider/stable-unique.txt"
     git -C "$provider" add stable-unique.txt
     git -C "$provider" commit -qm "stable unique"
@@ -480,14 +493,17 @@ test_worktree_sync_preserves_task_state_and_only_fast_forwards_stable_branch() {
     git -C "$rig" add main-c.txt
     git -C "$rig" commit -qm "main C"
     git -C "$rig" push -qu origin main
+    stderr="$tmp/diverged.stderr"
     set +e
-    "$WORKTREE_SETUP" "$rig" "$provider" gastown.nux --sync
+    "$WORKTREE_SETUP" "$rig" "$provider" gastown.nux --sync 2>"$stderr"
     status=$?
     set -e
-    [[ "$status" -ne 0 ]] ||
-        fail "sync accepted unique/diverged stable provider work"
+    [[ "$status" -eq 0 ]] ||
+        fail "sync failed pre_start on unique/diverged stable provider work (rc=$status)"
+    grep -qF 'has unique or diverged work' "$stderr" ||
+        fail "diverged sync did not report the preserved stable branch"
     [[ "$(git -C "$provider" rev-parse HEAD)" == "$stable_sha" ]] ||
-        fail "failed diverged sync rewrote the stable branch"
+        fail "skipped diverged sync rewrote the stable branch"
 
     # A Git worktree at the configured path is not sufficient: it must share
     # the exact rig repository common dir. Refuse foreign repositories before
@@ -742,7 +758,7 @@ test_workspace_metadata_reads_fail_closed_without_pipefail() {
 }
 
 test_workspace_collision_fails_closed_without_alternate() {
-    local tmp rig remote city provider canonical setup calls bd_subcommand
+    local tmp rig remote city provider canonical setup calls stderr bd_subcommand
     tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' RETURN
     rig="$tmp/rig"
@@ -752,6 +768,7 @@ test_workspace_collision_fails_closed_without_alternate() {
     canonical="$city/.gc/worktrees/demo/artifacts/worktrees/ac-safe1"
     setup="$tmp/workspace-create.sh"
     calls="$tmp/gc-calls"
+    stderr="$tmp/collision.stderr"
     bd_subcommand=$(printf '%s%s' b d)
 
     init_repo "$rig"
@@ -781,6 +798,14 @@ test_workspace_collision_fails_closed_without_alternate() {
                 "runtime drain-ack")
                     return 0
                     ;;
+                # Step 1 legitimately clears a stale handoff marker and records
+                # the resolved base ref before anything reads the artifact keys.
+                # Neither call names an artifact path, so neither can be the
+                # mutation this test forbids.
+                "$bd_subcommand update ac-safe1 --unset-metadata handoff_stage" | \
+                "$bd_subcommand update ac-safe1 --set-metadata base_ref=refs/remotes/origin/main")
+                    return 0
+                    ;;
                 "$bd_subcommand update "*)
                     fail "canonical collision reached a metadata update"
                     ;;
@@ -795,8 +820,20 @@ test_workspace_collision_fails_closed_without_alternate() {
         cd "$provider"
         # shellcheck source=/dev/null
         source "$setup"
-    ); then
+    ) 2>"$stderr"; then
         fail "invalid canonical-path collision did not stop workspace creation"
+    fi
+
+    # The stub above rejects every unlisted call but its `fail` only ends the
+    # subshell, which the `if` reads as "workspace creation stopped". Anchor the
+    # verdict on the collision branch's own output so an earlier halt cannot
+    # stand in for it, and on its drain-ack so the bead is really handed back.
+    grep -qF 'STOP. Preserve and resolve the collision manually' "$stderr" ||
+        fail "canonical collision check did not run: $(cat "$stderr")"
+    grep -qxF 'runtime drain-ack' "$calls" ||
+        fail "canonical collision did not drain-ack the claim"
+    if grep -qF -- '--set-metadata artifact_dir=' "$calls"; then
+        fail "canonical collision wrote artifact metadata"
     fi
 
     grep -qF 'preserve me' "$canonical/recovery.txt" ||
@@ -808,7 +845,7 @@ test_workspace_collision_fails_closed_without_alternate() {
 }
 
 test_workspace_rejects_redirected_artifact_root_before_creation() {
-    local tmp rig remote city provider redirected setup calls bd_subcommand
+    local tmp rig remote city provider redirected setup calls stderr bd_subcommand
     tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' RETURN
     rig="$tmp/rig"
@@ -818,6 +855,7 @@ test_workspace_rejects_redirected_artifact_root_before_creation() {
     redirected="$tmp/redirected-artifacts"
     setup="$tmp/workspace-create.sh"
     calls="$tmp/gc-calls"
+    stderr="$tmp/redirect.stderr"
     bd_subcommand=$(printf '%s%s' b d)
 
     init_repo "$rig"
@@ -847,6 +885,13 @@ test_workspace_rejects_redirected_artifact_root_before_creation() {
                 "runtime drain-ack")
                     return 0
                     ;;
+                # Same Step-1 writes as the collision test: the stage-marker
+                # clear and the base-ref record run before the artifact root is
+                # inspected and touch no artifact path.
+                "$bd_subcommand update ac-safe1 --unset-metadata handoff_stage" | \
+                "$bd_subcommand update ac-safe1 --set-metadata base_ref=refs/remotes/origin/main")
+                    return 0
+                    ;;
                 "$bd_subcommand update "*)
                     fail "redirected artifact root reached a metadata update"
                     ;;
@@ -861,8 +906,19 @@ test_workspace_rejects_redirected_artifact_root_before_creation() {
         cd "$provider"
         # shellcheck source=/dev/null
         source "$setup"
-    ); then
+    ) 2>"$stderr"; then
         fail "redirected artifact root did not stop workspace creation"
+    fi
+
+    # Same anchoring as the collision test: the refusal must come from the
+    # redirected-root branch itself, not from an earlier halt, and it must
+    # drain-ack the claim it gave up on.
+    grep -qF 'Task artifact root is redirected' "$stderr" ||
+        fail "redirected artifact root check did not run: $(cat "$stderr")"
+    grep -qxF 'runtime drain-ack' "$calls" ||
+        fail "redirected artifact root did not drain-ack the claim"
+    if grep -qF -- '--set-metadata artifact_dir=' "$calls"; then
+        fail "redirected artifact root wrote artifact metadata"
     fi
 
     [[ ! -e "$redirected/worktrees" ]] ||
@@ -1687,7 +1743,8 @@ test_metadata_migration_and_consumers_are_canonical_first() {
         "$SHUTDOWN_FORMULA" \
         "$REFINERY_FORMULA" \
         "$GASTOWN/agents/polecat/prompt.template.md" \
-        "$GASTOWN/agents/witness/prompt.template.md" <<'PY'
+        "$GASTOWN/agents/witness/prompt.template.md" \
+        "$GASTOWN/assets/scripts/shutdown-progress-probe.sh" <<'PY'
 import pathlib
 import sys
 import tomllib
@@ -1699,6 +1756,7 @@ import tomllib
     refinery_path,
     polecat_prompt_path,
     witness_prompt_path,
+    shutdown_probe_path,
 ) = (
     pathlib.Path(arg) for arg in sys.argv[1:]
 )
@@ -1821,22 +1879,28 @@ if recovery.index("confirm_orphan_still_unowned") > recovery.index(
 with shutdown_path.open("rb") as handle:
     shutdown = tomllib.load(handle)
 execute = next(step["description"] for step in shutdown["steps"] if step["id"] == "execute")
-if execute.index(".metadata.artifact_dir // empty") > execute.index(".metadata.work_dir // empty"):
+# 2124fdf moved the 7-minute window's read-only probe into the pack command
+# (`gc gastown shutdown-progress-probe`), which execs this shipped script, so
+# the artifact-read and path-validator contract lives there now. The kill
+# decision that consumes `$progress` is still the formula's.
+probe = shutdown_probe_path.read_text(encoding="utf-8")
+if probe.index(".metadata.artifact_dir // empty") > probe.index(".metadata.work_dir // empty"):
     raise SystemExit("shutdown dance does not read canonical artifact_dir first")
-if 'validate_progress_artifact_dir' not in execute:
+if 'validate_progress_artifact_dir' not in probe:
     raise SystemExit("shutdown dance lacks the artifact path validator")
-if 'find "$artifact_dir"' not in execute or 'find "$work_dir"' in execute:
+if 'find "$artifact_dir"' not in probe or 'find "$legacy_work_dir"' in probe:
     raise SystemExit("shutdown dance can scan an unvalidated legacy/provider work_dir")
 for fragment in (
     'progress="unknown"',
     'gc bd --rig "$target_rig" list',
     'gc bd --rig "$target_rig" show',
-    'if [ "$progress" = "unknown" ]; then',
     'canonical_path="$rig_namespace_real/artifacts/worktrees/$bead_id"',
     '[ "$candidate_real" != "$provider_real/worktrees/$bead_id" ]',
 ):
-    if fragment not in execute:
+    if fragment not in probe:
         raise SystemExit(f"shutdown fail-closed rig lookup contract missing: {fragment}")
+if 'if [ "$progress" = "unknown" ]; then' not in execute:
+    raise SystemExit("shutdown execute step no longer pardons an inconclusive probe")
 
 with refinery_path.open("rb") as handle:
     refinery = tomllib.load(handle)
@@ -1912,7 +1976,7 @@ test_workspace_metadata_reads_fail_closed_without_pipefail
 test_workspace_collision_fails_closed_without_alternate
 test_workspace_rejects_redirected_artifact_root_before_creation
 test_worktree_setup_ignores_gc_without_mutating_tracked_or_global_ignores
-test_worktree_sync_ignores_codex_skills_but_rejects_unrelated_dirt
+test_worktree_sync_ignores_codex_skills_but_preserves_unrelated_dirt
 test_worktree_sync_preserves_task_state_and_only_fast_forwards_stable_branch
 test_shutdown_probe_scopes_rig_and_fails_closed
 test_cleanup_command_is_idempotent_and_mr_retryable

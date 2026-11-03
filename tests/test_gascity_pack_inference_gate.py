@@ -1165,6 +1165,21 @@ def mutated_gastown_source(tmp_path: Path, old: str, new: str) -> Path:
     return pack_source
 
 
+def polecat_branch_content_gate_window(text: str) -> tuple[int, int]:
+    """Return the [start, end) slice of the branch-content gate's halt path.
+
+    The window is what ``validate_polecat_branch_content_gate`` judges: from the
+    ``COMMITS_AHEAD`` count to the ``git push origin HEAD`` it guards. Slice it
+    before counting or mutating a fragment, because the same escalation loop and
+    step-close pair also appear in the earlier branch-shape gate (e5c5c6e), so a
+    whole-file count matches twice and a whole-file replace can edit the wrong
+    copy. Outside the window the text is left untouched.
+    """
+    start = text.index("COMMITS_AHEAD=$(git rev-list --count")
+    end = text.index("git push origin HEAD", start)
+    return start, end
+
+
 def test_validate_polecat_branch_content_gate_accepts_current_pack() -> None:
     gascity_pack_inference_gate.validate_polecat_branch_content_gate(
         gascity_pack_inference_gate.PACK_SPECS["gastown"].source
@@ -1283,8 +1298,10 @@ def test_validate_polecat_branch_content_gate_rejects_disarmed_halt_path(
     pack_source = gastown_formulas_copy(tmp_path)
     path = pack_source / "formulas" / "mol-polecat-work.toml"
     text = path.read_text(encoding="utf-8")
-    assert text.count(original) == 1
-    path.write_text(text.replace(original, replacement), encoding="utf-8")
+    start, end = polecat_branch_content_gate_window(text)
+    gate = text[start:end]
+    assert gate.count(original) == 1
+    path.write_text(text[:start] + gate.replace(original, replacement) + text[end:], encoding="utf-8")
 
     with pytest.raises(gascity_pack_inference_gate.GateError, match=expected):
         gascity_pack_inference_gate.validate_polecat_branch_content_gate(pack_source)
