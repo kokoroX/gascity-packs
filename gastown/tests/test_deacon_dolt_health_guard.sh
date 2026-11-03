@@ -14,11 +14,13 @@ set -euo pipefail
 # so each of these was evaluated as a health report, and a real failure to run
 # the check was indistinguishable from any of them.
 #
-# The step's script is LIFTED out of the formula (through tomllib, so TOML
+# The step's wrapper is LIFTED out of the formula (through tomllib, so TOML
 # escapes decode exactly as gc decodes them) and executed against a stub `gc`
 # whose `dolt health --json` answers are the literal outputs measured from gc
-# v1.5.0 and the 1.5.1 hotfix branch. Point DOLT_HEALTH_FORMULA at another tree
-# to run this file byte-unmodified against it (the red control).
+# v1.5.0 and the 1.5.1 hotfix branch. The wrapper hands classification to the
+# pack command, whose real run.sh runs against the same stub, so a failed run
+# still cannot be confused with a report. Point DOLT_HEALTH_FORMULA at another
+# tree to run this file byte-unmodified against it (the red control).
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 FORMULA="${DOLT_HEALTH_FORMULA:-$ROOT/gastown/formulas/mol-deacon-patrol.toml}"
@@ -47,7 +49,7 @@ fail() {
     exit 1
 }
 
-# Every bash fence of the dolt-health step that runs `gc dolt health`, in
+# Every bash fence of the dolt-health step that runs the health check, in
 # order, as one script: if the step ever splits the run from its
 # classification again, the split is executed exactly as an agent would.
 lift_step() {
@@ -75,12 +77,14 @@ for line in step["description"].split("\n"):
 def runs_health(fence):
     # A command position, not a mention: escalation text that quotes the
     # command name is not a second run of it.
-    return any(line.strip().startswith("gc dolt health") or "$(gc dolt health" in line
+    return any(line.strip().startswith("gc dolt health")
+               or "gc gastown deacon-dolt-health" in line
+               or "$(gc dolt health" in line
                for line in fence.split("\n"))
 
 runs = [f for f in fences if runs_health(f)]
 if not runs:
-    sys.exit(f"{formula}: the dolt-health step has no bash fence that runs gc dolt health")
+    sys.exit(f"{formula}: the dolt-health step has no bash fence that runs the health check")
 body = "\n".join(runs).replace("{{binding_prefix}}", "") + "\n"
 if "{{" in body:
     sys.exit("unsubstituted template hole in the lifted dolt-health script")
@@ -94,6 +98,9 @@ write_gc_stub() {
     cat >"$BIN/gc" <<'SH'
 #!/usr/bin/env bash
 printf 'gc %s\n' "$*" >>"$GC_LOG"
+if [ "$*" = "gastown deacon-dolt-health" ]; then
+    GC_PACK_DIR="$PACK" exec "$PACK/commands/deacon-dolt-health/run.sh"
+fi
 if [ "$*" != "dolt health --json" ]; then
     case "$1" in
         dolt) echo "stub: unexpected gc dolt invocation: $*" >&2; exit 64 ;;
@@ -172,7 +179,7 @@ run_step() {
     : >"$GC_LOG"
     (
         cd "$tmp" || exit 99
-        PATH="$BIN:$PATH" GC_LOG="$GC_LOG" STUB_HEALTH="$1" \
+        PATH="$BIN:$PATH" GC_LOG="$GC_LOG" STUB_HEALTH="$1" PACK="$ROOT/gastown" \
             bash -c 'set +eu; . "$1"' bash "$BLOCK"
     ) >"$LAST_OUT" 2>&1 || RC=$?
 }

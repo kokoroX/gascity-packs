@@ -102,6 +102,11 @@ GASTOWN_FORMULA_CONTRACTS = {
         "return beads to the pool",
         "gc session list --state=all --json",
     ),
+    "mol-shutdown-dance": (
+        "gc gastown shutdown-progress-probe",
+        "progress_signal=$progress",
+        "PARDONED: pre-kill progress checks inconclusive",
+    ),
 }
 GASTOWN_BUILD_WORKFLOW_CONTRACTS = {
     "mol-polecat-work": (
@@ -208,6 +213,7 @@ GASTOWN_BUILD_WORKFLOW_CONTRACTS = {
     "mol-deacon-patrol": (
         "Work-layer health",
         "queue-starvation-check",
+        "gc gastown deacon-dolt-health",
         "gc agents list --json --active",
         "gc bd create --type=task --labels=warrant",
         "\"gc.routed_to\":\"{{binding_prefix}}dog\"",
@@ -1653,6 +1659,8 @@ def initialize_city(
     if pack_spec.gastown and should_validate_gastown_orchestration_contract(gates):
         validate_gastown_orchestration_contract(pack_spec.source)
         validate_witness_liveness_map_contract(pack_spec.source)
+        validate_shutdown_progress_probe_contract(pack_spec.source)
+        validate_deacon_dolt_health_contract(pack_spec.source)
         validate_polecat_base_ref_contract(pack_spec.source)
     else:
         validate_methodology_flow_contract(pack_spec)
@@ -3084,6 +3092,46 @@ def validate_witness_liveness_map_contract(pack_source: Path) -> None:
     ):
         if fragment not in text:
             raise GateError(f"Witness liveness map contract drifted: missing {fragment!r}")
+
+
+def validate_shutdown_progress_probe_contract(pack_source: Path) -> None:
+    path = pack_source / "assets" / "scripts" / "shutdown-progress-probe.sh"
+    if not path.is_file():
+        raise GateError(f"Shutdown progress probe contract drifted: missing {path}")
+    text = path.read_text(encoding="utf-8", errors="replace")
+    # The probe must keep its machine-readable verdict, the exact session
+    # identity match (a dropped identity silently misses a live target), and
+    # the mtime window that separates real work from an idle target. A missing
+    # target must stay a usage error, never a silent "none".
+    for fragment in (
+        "progress_signal=$progress",
+        "def identities: [.id, .name, .session_name, .alias, .agent_name]",
+        "$identities | index($a)",
+        "-newermt '-7 minutes'",
+        '[ -z "${1:-}" ] || [ "$#" -ne 1 ]',
+    ):
+        if fragment not in text:
+            raise GateError(f"Shutdown progress probe contract drifted: missing {fragment!r}")
+
+
+def validate_deacon_dolt_health_contract(pack_source: Path) -> None:
+    path = pack_source / "assets" / "scripts" / "deacon-dolt-health.sh"
+    if not path.is_file():
+        raise GateError(f"Deacon Dolt health contract drifted: missing {path}")
+    text = path.read_text(encoding="utf-8", errors="replace")
+    # Every classification branch is load-bearing: dropping one turns an
+    # absent Dolt, an outage, or a failed check into the wrong answer. The
+    # error extras carry the rc and stderr the patrol escalation quotes.
+    for fragment in (
+        "cannot resolve runtime port",
+        "dolt-state.json (missing)",
+        "present but not running",
+        "json_command_not_found",
+        "DOLT_HEALTH: evaluate",
+        'DOLT_HEALTH_RC: $rc',
+    ):
+        if fragment not in text:
+            raise GateError(f"Deacon Dolt health contract drifted: missing {fragment!r}")
 
 
 def validate_gastown_orchestration_contract(pack_source: Path) -> None:
