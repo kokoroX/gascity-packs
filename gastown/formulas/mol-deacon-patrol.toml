@@ -426,57 +426,30 @@ may have failed), orphan databases, and zombie Dolt server processes.
 
 `gc dolt health` is a command of the Dolt pack, not of gc itself, and it
 reports on a Dolt server that gc manages. A city with no gc-managed Dolt has
-nothing for it to report, and says so in one of three ways: a city that does
-not import the Dolt pack (for example one on an exec or other beads provider)
-answers `unknown command "dolt"`; a scope whose server bd runs behind its
-proxy answers with a `skipped` report; and a city whose server bd owns
-directly (a direct-transport city) has no gc-managed runtime state, so the
-command exits 78 with `dolt-state.json (missing)`. None of these is a Dolt
-outage. A gc-managed server that is down also exits 78, with its state file
-present but no server running, and that one is an outage. So capture the
-exit code and stderr instead of piping the output straight into a parser:
-"not applicable", "down", "the check itself failed" and "here is a report"
-must stay different answers. Do not probe with `gc dolt --help` first: it
-exits 0 whether or not `gc dolt` exists.
+nothing for it to report, and says so in one of several ways; none of them is
+a Dolt outage. A gc-managed server that is down also reports differently, and
+that one is an outage.
+
+Run the pack command to classify the result; do not rewrite the classification
+inline:
 
 ```bash
-DOLT_HEALTH_ERR=$(mktemp)
-DOLT_HEALTH_JSON=$(gc dolt health --json 2>"$DOLT_HEALTH_ERR")
-DOLT_HEALTH_RC=$?
-DOLT_HEALTH_STDERR=$(head -c 2000 "$DOLT_HEALTH_ERR")
-rm -f "$DOLT_HEALTH_ERR"
-# Exit 78 is the Dolt pack failing to resolve a gc-managed server's port: with
-# no runtime state file there is no gc-managed Dolt in this city, and with a
-# state file but no running server the gc-managed Dolt is down. gc --json
-# reports a missing command as error.code json_command_not_found; without the
-# JSON envelope it says `unknown command "dolt"` on stderr.
-if [ "$DOLT_HEALTH_RC" -ne 0 ]; then
-  if [ "$DOLT_HEALTH_RC" -eq 78 ] && printf '%s' "$DOLT_HEALTH_STDERR" | grep -q 'cannot resolve runtime port' &&
-     printf '%s' "$DOLT_HEALTH_STDERR" | grep -q 'dolt-state.json (missing)'; then
-    echo "DOLT_HEALTH: not-applicable (no gc-managed Dolt runtime in this city; bd owns the server or none exists)"
-  elif [ "$DOLT_HEALTH_RC" -eq 78 ] && printf '%s' "$DOLT_HEALTH_STDERR" | grep -q 'present but not running'; then
-    echo "DOLT_HEALTH: outage (the gc-managed Dolt server is not running) -> CRITICAL row"
-  elif printf '%s' "$DOLT_HEALTH_JSON" | jq -e '.error.code == "json_command_not_found"' >/dev/null 2>&1 ||
-     printf '%s\\n%s\\n' "$DOLT_HEALTH_STDERR" "$DOLT_HEALTH_JSON" | grep -q -e 'unknown command "dolt"' -e 'unknown command "health"'; then
-    echo "DOLT_HEALTH: not-applicable (gc dolt health does not exist in this city; no Dolt pack)"
-  else
-    echo "DOLT_HEALTH: error (gc dolt health --json exited $DOLT_HEALTH_RC)"
+# BEGIN DEACON_DOLT_HEALTH
+DOLT_HEALTH_OUT=$(gc gastown deacon-dolt-health) || {
+  DOLT_HEALTH_OUT="DOLT_HEALTH: error (gc gastown deacon-dolt-health failed)"
+}
+DOLT_HEALTH_LINE=$(printf '%s\\n' "$DOLT_HEALTH_OUT" | grep '^DOLT_HEALTH: ' | head -n 1)
+DOLT_HEALTH_CAUSE=$(printf '%s\\n' "$DOLT_HEALTH_OUT" | sed -n 's/^DOLT_HEALTH_CAUSE: //p' | tail -n 1)
+case "$DOLT_HEALTH_LINE" in
+  "DOLT_HEALTH: error"*)
+    DOLT_HEALTH_STDERR=$(printf '%s\\n' "$DOLT_HEALTH_OUT" | sed -n 's/^DOLT_HEALTH_STDERR: //p' | tail -n 1)
     gc mail send mayor/ --dedup deacon-dolt-health-could-not-run -s "DEACON: gc dolt health could not run" \\
-      -m "gc dolt health --json exited $DOLT_HEALTH_RC, so Dolt data-plane health was NOT measured this cycle.
+      -m "${DOLT_HEALTH_CAUSE:-$DOLT_HEALTH_LINE}, so Dolt data-plane health was NOT measured this cycle.
 stderr: $DOLT_HEALTH_STDERR"
-  fi
-elif ! printf '%s' "$DOLT_HEALTH_JSON" | jq -e 'type == "object"' >/dev/null 2>&1; then
-  echo "DOLT_HEALTH: error (gc dolt health --json printed no JSON report)"
-  gc mail send mayor/ --dedup deacon-dolt-health-could-not-run -s "DEACON: gc dolt health could not run" \\
-    -m "gc dolt health --json exited 0 without a JSON report, so Dolt data-plane health was NOT measured this cycle.
-stderr: $DOLT_HEALTH_STDERR"
-else
-  printf '%s' "$DOLT_HEALTH_JSON" | jq -r '
-    if (.skipped | type) == "object" then "DOLT_HEALTH: not-applicable (" + (.skipped.reason // "skipped") + ")"
-    elif .applicable == false then "DOLT_HEALTH: not-applicable (" + (.reason // "no Dolt data plane") + ")"
-    else "DOLT_HEALTH: evaluate" end'
-  printf '%s\\n' "$DOLT_HEALTH_JSON"
-fi
+    ;;
+esac
+printf '%s\\n' "$DOLT_HEALTH_OUT"
+# END DEACON_DOLT_HEALTH
 ```
 
 Act on the `DOLT_HEALTH:` line:
@@ -490,7 +463,7 @@ Act on the `DOLT_HEALTH:` line:
   exists but no server is running. This is Step 2's `server.reachable ==
   false` row without a report to read; send Step 3's **Server down
   (CRITICAL)** escalation.
-- `error (...)`: the script already sent one non-critical escalation. It is
+- `error (...)`: the step already sent one non-critical escalation. It is
   deduplicated (`--dedup`), so the mayor holds one such message until it is
   archived, not one per cycle. Health was not measured, so there is nothing to
   evaluate; move on.

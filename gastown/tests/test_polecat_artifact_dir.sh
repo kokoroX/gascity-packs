@@ -36,23 +36,10 @@ PY
 }
 
 extract_shutdown_probe() {
-    local output=$1
-    python3 - "$SHUTDOWN_FORMULA" "$output" <<'PY'
-import pathlib
-import sys
-import tomllib
-
-formula_path = pathlib.Path(sys.argv[1])
-output_path = pathlib.Path(sys.argv[2])
-with formula_path.open("rb") as handle:
-    formula = tomllib.load(handle)
-execute = next(step for step in formula["steps"] if step["id"] == "execute")
-description = execute["description"]
-begin = description.index("# BEGIN SHUTDOWN_PROGRESS_PROBE")
-end = description.index("# END SHUTDOWN_PROGRESS_PROBE", begin)
-block = description[begin:end].splitlines()[1:]
-output_path.write_text("\n".join(block) + "\n", encoding="utf-8")
-PY
+    # The probe now lives in a pack command; execute that script directly so
+    # this test still exercises the real classification rather than a copy
+    # lifted out of the formula.
+    cp "$GASTOWN/assets/scripts/shutdown-progress-probe.sh" "$1"
 }
 
 extract_witness_artifact_safety_gate() {
@@ -546,6 +533,7 @@ test_shutdown_probe_scopes_rig_and_fails_closed() {
             esac
         }
         target="demo/gastown.worker"
+        set -- "$target"
         # shellcheck source=/dev/null
         source "$probe"
     ) > "$output"
@@ -569,6 +557,7 @@ test_shutdown_probe_scopes_rig_and_fails_closed() {
             esac
         }
         target="demo/gastown.worker"
+        set -- "$target"
         # shellcheck source=/dev/null
         source "$probe"
     ) > "$output"

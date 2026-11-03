@@ -1074,6 +1074,41 @@ def test_witness_liveness_map_contract_pins_map_build(tmp_path) -> None:
         gascity_pack_inference_gate.validate_witness_liveness_map_contract(tmp_path)
 
 
+def test_shutdown_progress_probe_contract_pins_current_script() -> None:
+    gascity_pack_inference_gate.validate_shutdown_progress_probe_contract(
+        gascity_pack_inference_gate.PACK_SPECS["gastown"].source
+    )
+
+
+def test_shutdown_progress_probe_contract_rejects_dropped_identity(tmp_path) -> None:
+    source = gascity_pack_inference_gate.PACK_SPECS["gastown"].source
+    path = tmp_path / "assets" / "scripts" / "shutdown-progress-probe.sh"
+    path.parent.mkdir(parents=True)
+    text = (source / "assets" / "scripts" / path.name).read_text(encoding="utf-8")
+    path.write_text(text.replace(
+        "def identities: [.id, .name, .session_name, .alias, .agent_name]",
+        "def identities: [.id]",
+    ), encoding="utf-8")
+    with pytest.raises(gascity_pack_inference_gate.GateError, match="identities"):
+        gascity_pack_inference_gate.validate_shutdown_progress_probe_contract(tmp_path)
+
+
+def test_deacon_dolt_health_contract_pins_current_script() -> None:
+    gascity_pack_inference_gate.validate_deacon_dolt_health_contract(
+        gascity_pack_inference_gate.PACK_SPECS["gastown"].source
+    )
+
+
+def test_deacon_dolt_health_contract_rejects_dropped_outage_branch(tmp_path) -> None:
+    source = gascity_pack_inference_gate.PACK_SPECS["gastown"].source
+    path = tmp_path / "assets" / "scripts" / "deacon-dolt-health.sh"
+    path.parent.mkdir(parents=True)
+    text = (source / "assets" / "scripts" / path.name).read_text(encoding="utf-8")
+    path.write_text(text.replace("present but not running", "running"), encoding="utf-8")
+    with pytest.raises(gascity_pack_inference_gate.GateError, match="present but not running"):
+        gascity_pack_inference_gate.validate_deacon_dolt_health_contract(tmp_path)
+
+
 def test_validate_gastown_orchestration_contract_accepts_current_pack() -> None:
     gascity_pack_inference_gate.validate_gastown_orchestration_contract(
         gascity_pack_inference_gate.PACK_SPECS["gastown"].source
