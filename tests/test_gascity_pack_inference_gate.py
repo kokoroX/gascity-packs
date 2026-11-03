@@ -1053,6 +1053,27 @@ Check its configured formula and named-session surface instead.
     )
 
 
+def test_witness_liveness_map_contract_pins_script(tmp_path) -> None:
+    source = gascity_pack_inference_gate.PACK_SPECS["gastown"].source
+    gascity_pack_inference_gate.validate_witness_liveness_map_contract(source)
+    path = tmp_path / "assets" / "scripts" / "witness-liveness-map.sh"
+    path.parent.mkdir(parents=True)
+    text = (source / "assets" / "scripts" / path.name).read_text(encoding="utf-8")
+    path.write_text(text.replace("configured_named_identity", "missing_identity"), encoding="utf-8")
+    with pytest.raises(gascity_pack_inference_gate.GateError, match="configured_named_identity"):
+        gascity_pack_inference_gate.validate_witness_liveness_map_contract(tmp_path)
+
+
+def test_witness_liveness_map_contract_pins_map_build(tmp_path) -> None:
+    source = gascity_pack_inference_gate.PACK_SPECS["gastown"].source
+    path = tmp_path / "assets" / "scripts" / "witness-liveness-map.sh"
+    path.parent.mkdir(parents=True)
+    text = (source / "assets" / "scripts" / path.name).read_text(encoding="utf-8")
+    path.write_text(text.replace("reduce ($sessions[0].sessions // [])[] as $s", "[]"), encoding="utf-8")
+    with pytest.raises(gascity_pack_inference_gate.GateError, match="sessions"):
+        gascity_pack_inference_gate.validate_witness_liveness_map_contract(tmp_path)
+
+
 def test_validate_gastown_orchestration_contract_accepts_current_pack() -> None:
     gascity_pack_inference_gate.validate_gastown_orchestration_contract(
         gascity_pack_inference_gate.PACK_SPECS["gastown"].source

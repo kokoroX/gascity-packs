@@ -186,11 +186,8 @@ can import Gastown under several bindings, each working its own repository
 (`GC_REPO_ROOT`) with its own witness; leave other bindings' beads to their
 witness.
 
-Get the full session roster for liveness checks:
-```bash
-gc session list --state=all --json
-gc bd list --type=session --label=gc:session --include-infra --include-gates --all --json --limit=0
-```
+The liveness command reads the full roster with `gc session list --state=all --json`
+and the session beads used for configured identities.
 
 For each bead with an assignee, check **session-ID liveness** — NOT
 template pattern matching. Pool instances get new IDs on restart, so
@@ -217,13 +214,11 @@ a NEW session with a different ID — the old one never comes back.
      `session_name`, `alias`, and `agent_name` — the exact identifier forms
      an assignee may take.
 
-   Stream both JSON blobs through temp files, never `--argjson` on argv: on a
-   busy city the session `command` fields are large and overflow ARG_MAX
-   (`argument list too long: jq`). Build the map through this function rather
-   than inline — Step 2a re-runs it per orphan candidate, and a single
-   definition is what stops the pre-destruction re-check from drifting away
-   from this classification: same two legs, same identifier forms, same
-   last-write-wins tie-break on duplicate identifiers.
+   `gc gastown witness-liveness-map` builds the map through temporary files,
+   avoiding ARG_MAX on large rosters. Do not inline or rewrite its jq: the
+   same command supplies both classification and the pre-destruction check,
+   including both legs and last-write-wins duplicate handling. In a fresh
+   shell for Step 2a, redefine the short wrapper below before calling it.
    ```bash
    build_liveness_map() {
      # Stamp the watermark BEFORE the snapshot. Everything touched from this
@@ -234,36 +229,12 @@ a NEW session with a different ID — the old one never comes back.
      # wrong side of the comparison, which is the fail-open direction.
      MAP_BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
      LIVENESS_MAP='{}'; MAP_COUNT=0; SESSION_COUNT=0; MAP_QUERY_RC=0
-
-     SESSIONS_FILE=$(mktemp); SESSION_BEADS_FILE=$(mktemp)
-     gc session list --state=all --json > "$SESSIONS_FILE" || MAP_QUERY_RC=1
-     gc bd list --type=session --label=gc:session --include-infra --include-gates --all --json --limit=0 > "$SESSION_BEADS_FILE" || MAP_QUERY_RC=1
-
-     if [ "$MAP_QUERY_RC" -eq 0 ]; then
-       LIVENESS_MAP=$(jq -n --slurpfile sessions "$SESSIONS_FILE" --slurpfile session_beads "$SESSION_BEADS_FILE" '
-         def add($m; $key; $state; $closed):
-           if (($key // "") | length) == 0 then $m
-           else $m + {($key): (if $closed then "closed" else ($state // "") end)}
-           end;
-         (reduce ($sessions[0].sessions // [])[] as $s ({};
-             add(.; $s.id;         $s.state; ($s.closed // false))
-           | add(.; $s.name;       $s.state; ($s.closed // false))
-           | add(.; $s.session_name; $s.state; ($s.closed // false))
-           | add(.; $s.alias;      $s.state; ($s.closed // false))
-           | add(.; $s.agent_name; $s.state; ($s.closed // false))
-         )) as $from_sessions
-         | reduce ($session_beads[0] // [])[] as $b ($from_sessions;
-             add(.; $b.metadata.configured_named_identity; $b.metadata.state; ($b.status == "closed")))') || MAP_QUERY_RC=1
-       SESSION_COUNT=$(jq -r '(.sessions // []) | length' "$SESSIONS_FILE" 2>/dev/null || echo 0)
-       MAP_COUNT=$(printf '%s' "$LIVENESS_MAP" | jq -r 'length' 2>/dev/null || echo 0)
-     fi
-     rm -f "$SESSIONS_FILE" "$SESSION_BEADS_FILE"
-
-     # Non-zero means "could not verify liveness" — it never means "nobody is
-     # alive". Callers must read it as a reason to leave beads alone, never as
-     # a licence to orphan them.
+     MAP_RESULT=$(gc gastown witness-liveness-map) || MAP_QUERY_RC=1
+     LIVENESS_MAP=$(printf '%s' "$MAP_RESULT" | jq -ce '.map | objects' 2>/dev/null) || MAP_QUERY_RC=1
+     MAP_COUNT=$(printf '%s' "$MAP_RESULT" | jq -r '.map_count // 0' 2>/dev/null) || MAP_COUNT=0
+     SESSION_COUNT=$(printf '%s' "$MAP_RESULT" | jq -r '.session_count // 0' 2>/dev/null) || SESSION_COUNT=0
+     # Failure means liveness could not be verified, never that nobody is alive.
      if [ "$MAP_QUERY_RC" -ne 0 ]; then return 1; fi
-     if [ "${MAP_COUNT:-0}" -eq 0 ] && [ "${SESSION_COUNT:-0}" -gt 0 ]; then return 1; fi
      return 0
    }
 
