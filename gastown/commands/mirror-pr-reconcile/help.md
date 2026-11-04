@@ -11,11 +11,11 @@ gc gastown mirror-pr-reconcile record WORK TARGET HEAD_SHA
 With no arguments, the command checks at most one least-recently-checked marker
 for this origin. `--all` checks every matching marker in that order (ties by
 bead ID), continues after failures and exits 1 if any check fails. Reconciliation
-preserves the existing assignee. The origin must be a local mirror repository:
-its `gc-pr-state/<work>.json` is written by the host mirror synchronizer. Older
-markers without an origin are claimed only when that state file exists.
+preserves the existing assignee. The configured origin identifies the mirror;
+the host mirror synchronizer publishes state in `refs/gc-pr-state/<work>`.
+Older markers without an origin are claimed only when that ref exists.
 
-A missing file, open PR or closed PR is checked against the freshly fetched
+A missing state ref, open PR or closed PR is checked against the freshly fetched
 target: if the handoff head is reachable, the bead is marked merged. Otherwise
 missing and open PRs remain pending, and closed PRs are routed to a human.
 A merged state must match the handoff identity and its merge commit must be

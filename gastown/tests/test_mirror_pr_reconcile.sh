@@ -10,8 +10,9 @@ export HOME="$TMP/home" GIT_CONFIG_NOSYSTEM=1
 export GC_AGENT=rig/refinery GC_RIG=rig GC_TEST_LOG="$TMP/calls" GC_TEST_LIST="$TMP/list.json"
 export GC_REPO_ROOT="$TMP/clone"
 
-git init -q --bare --initial-branch=main "$TMP/origin.git"
-git init -q --initial-branch=main "$TMP/seed"
+mkdir -p "$TMP/origin.git" "$TMP/seed"
+git -C "$TMP/origin.git" init -q --bare --initial-branch=main
+git -C "$TMP/seed" init -q --initial-branch=main
 git -C "$TMP/seed" config user.name Test
 git -C "$TMP/seed" config user.email test@example.invalid
 printf 'base\n' >"$TMP/seed/file"
@@ -23,9 +24,20 @@ printf 'work\n' >>"$TMP/seed/file"
 git -C "$TMP/seed" commit -qam work
 HEAD_SHA=$(git -C "$TMP/seed" rev-parse HEAD)
 git -C "$TMP/seed" push -q origin HEAD:refs/heads/gc-pr/main/work-1
-git clone -q "$TMP/origin.git" "$TMP/clone"
-mkdir -p "$TMP/origin.git/gc-pr-state"
-STATE="$TMP/origin.git/gc-pr-state/work-1.json"
+git -C "$TMP" clone -q "$TMP/origin.git" "$TMP/clone"
+export GC_TEST_REAL_GIT
+GC_TEST_REAL_GIT=$(command -v git)
+
+cat >"$TMP/bin/git" <<'SH'
+#!/bin/sh
+for arg in "$@"; do
+  if [ -n "${GC_TEST_FAIL_LS_REF:-}" ] && [ "$arg" = "$GC_TEST_FAIL_LS_REF" ]; then
+    exit 1
+  fi
+done
+exec "$GC_TEST_REAL_GIT" "$@"
+SH
+chmod +x "$TMP/bin/git"
 
 cat >"$TMP/bin/gc" <<'SH'
 #!/bin/sh
@@ -73,12 +85,19 @@ export PATH="$TMP/bin:$PATH"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 reset_case() {
     : >"$GC_TEST_LOG"
-    rm -rf "$STATE"
+    git --git-dir="$TMP/origin.git" update-ref -d refs/gc-pr-state/work-1
     jq -n --arg head "$HEAD_SHA" '[{id:"work-1",status:"blocked",metadata:{merge_strategy:"mirror-pr",merge_result:"pull_request_pending",target:"main",pr_branch:"gc-pr/main/work-1",pr_head:$head,mirror_pr_reconcile_pending:"true",mirror_pr_origin:$origin}}]' --arg origin "$TMP/origin.git" >"$GC_TEST_LIST"
+}
+write_ref() {
+    local work=$1 filename=$2 blob tree commit
+    blob=$(git --git-dir="$TMP/origin.git" hash-object -w --stdin)
+    tree=$(printf '100644 blob %s\t%s\n' "$blob" "$filename" | git --git-dir="$TMP/origin.git" mktree)
+    commit=$(printf 'state\n' | git --git-dir="$TMP/origin.git" -c user.name=Test -c user.email=test@example.invalid commit-tree "$tree")
+    git --git-dir="$TMP/origin.git" update-ref "refs/gc-pr-state/$work" "$commit"
 }
 write_state() {
     jq -n --arg state "$1" --arg head "$2" --arg merge "$3" \
-        '{work:"work-1",branch:"gc-pr/main/work-1",target:"main",head_sha:$head,state:$state,merge_sha:$merge,pr_url:"https://example.invalid/pr/1"}' >"$STATE"
+        '{work:"work-1",branch:"gc-pr/main/work-1",target:"main",head_sha:$head,state:$state,merge_sha:$merge,pr_url:"https://example.invalid/pr/1"}' | write_ref work-1 state.json
 }
 no_close() { ! grep -F 'gc <bd> <close>' "$GC_TEST_LOG" >/dev/null || fail 'unexpected close'; }
 contains() { grep -F "$1" "$GC_TEST_LOG" >/dev/null || fail "missing call: $1"; }
@@ -130,8 +149,9 @@ contains '<gc.routed_to=human>'
 contains 'gc <mail> <send> <mayor/>'
 
 reset_case
-mkdir "$STATE"
-if sh "$COMMAND"; then fail 'unreadable state accepted'; fi
+printf '{}\n' | write_ref work-1 wrong.json
+if sh "$COMMAND" >"$TMP/invalid-output" 2>&1; then fail 'invalid state tree accepted'; fi
+grep -F 'cannot read valid state for work-1' "$TMP/invalid-output" >/dev/null || fail 'invalid tree did not follow invalid state path'
 no_close
 
 reset_case
@@ -221,7 +241,7 @@ for work in a-fail b-merged c-open d-foreign e-foreign-closed; do
     [ "$work" != b-merged ] || state=merged
     jq -n --arg work "$work" --arg head "$HEAD_SHA" --arg state "$state" \
         '{work:$work,branch:("gc-pr/main/"+$work),target:"main",head_sha:$head,state:$state,merge_sha:$head}' \
-        >"$TMP/origin.git/gc-pr-state/$work.json"
+        | write_ref "$work" state.json
 done
 export GC_TEST_FAIL_WORK=a-fail
 if sh "$COMMAND" --all >"$TMP/all-output"; then fail '--all did not report failure'; fi
@@ -263,5 +283,28 @@ unset GC_TEST_CLEANUP_FAIL
 sh "$COMMAND" >"$TMP/starvation-output"
 grep -F 'PENDING: b-blocked' "$TMP/starvation-output" >/dev/null || fail 'failed closed bead starved the blocked bead'
 ! grep -F 'gc <bd> <close>' "$GC_TEST_LOG" >/dev/null || fail 'blocked bead was closed while unmerged'
+
+reset_case
+git -C "$TMP/clone" config remote.origin.url /repos-nonexistent/mirrors/origin.git
+git -C "$TMP/clone" config url."$TMP/origin.git".insteadOf /repos-nonexistent/mirrors/origin.git
+sh "$COMMAND" record work-1 main "$HEAD_SHA"
+contains '<mirror_pr_origin=/repos-nonexistent/mirrors/origin.git>'
+write_state closed "$HEAD_SHA" ''
+if sh "$COMMAND"; then fail 'closed PR via insteadOf accepted'; fi
+contains '<gc.routed_to=human>'
+contains 'gc <mail> <send> <mayor/>'
+git -C "$TMP/clone" config remote.origin.url "$TMP/origin.git"
+git -C "$TMP/clone" config --unset url."$TMP/origin.git".insteadOf
+
+reset_case
+export GC_TEST_FAIL_LS_REF='refs/gc-pr-state/*'
+if sh "$COMMAND" >"$TMP/ls-fail-output" 2>&1; then fail 'failed sweep ls-remote accepted'; fi
+! grep -F 'No pending mirror PRs.' "$TMP/ls-fail-output" >/dev/null || fail 'failed sweep treated as no state'
+unset GC_TEST_FAIL_LS_REF
+export GC_TEST_FAIL_LS_REF=refs/gc-pr-state/work-1
+if sh "$COMMAND" >"$TMP/ls-fail-output" 2>&1; then fail 'failed individual ls-remote accepted'; fi
+! grep -F 'mirror has not produced a state file' "$TMP/ls-fail-output" >/dev/null || fail 'failed individual lookup treated as no state'
+no_close
+unset GC_TEST_FAIL_LS_REF
 
 printf 'Mirror PR reconciliation tests passed\n'
