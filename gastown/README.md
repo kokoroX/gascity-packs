@@ -74,7 +74,7 @@ arrives.
 
 With `mirror-pr`, refinery pushes the tested commit without force to the local
 mirror's `gc-pr/<target>/<work>` branch and blocks the bead. The host mirror
-synchronizer records PR state in `gc-pr-state/<work>.json` inside the bare
+synchronizer records PR state in `refs/gc-pr-state/<work>` in the mirror
 origin. `gc gastown mirror-pr-reconcile` checks one pending handoff per work
 scan and closes it when the recorded head or a validated PR merge commit is
 reachable from the freshly fetched target. It cleans the task artifact and

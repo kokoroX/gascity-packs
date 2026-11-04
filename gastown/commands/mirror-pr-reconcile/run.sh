@@ -69,12 +69,12 @@ normalize_origin() {
 }
 
 resolve_origin() {
-    remote_origin=$(rig_git remote get-url origin) || return 1
+    remote_origin=$(rig_git config --get remote.origin.url) ||
+        remote_origin=$(rig_git remote get-url origin) || return 1
     origin=$(normalize_origin "$remote_origin") || {
         echo 'mirror-pr-reconcile: origin is not a local mirror path' >&2
         return 1
     }
-    state_dir=$origin/gc-pr-state
 }
 
 record_handoff() {
@@ -217,8 +217,9 @@ reconcile_one() {
         manual 'Invalid mirror PR lifecycle; inspect the handoff.'
         return 1
     }
-    state_file=$state_dir/$work.json
-    if [ ! -e "$state_file" ] && [ ! -L "$state_file" ]; then
+    state_ref=refs/gc-pr-state/$work
+    remote_state=$(rig_git ls-remote --refs origin "$state_ref") || return 1
+    if [ -z "$remote_state" ]; then
         if target_contains_head; then
             finish_ancestry
             return $?
@@ -230,11 +231,25 @@ reconcile_one() {
         echo "PENDING: $work — mirror has not produced a state file."
         return 0
     fi
-    state_json=$(jq -ce --arg work "$work" --arg branch "$branch" --arg target "$target" '
+    rig_git fetch --no-tags origin "+$state_ref:$state_ref" || return 1
+    state_tree=''
+    if [ "$(rig_git cat-file -t "$state_ref")" = commit ]; then
+        state_tree=$(rig_git ls-tree --format='%(objectmode) %(objecttype) %(path)' "$state_ref") || state_tree=''
+    fi
+    case "$state_tree" in
+        '100644 blob state.json'|'100755 blob state.json')
+            state_json=$(rig_git cat-file blob "$state_ref:state.json") || state_json='' ;;
+        *) state_json='' ;;
+    esac
+    state_json=$(printf '%s' "$state_json" | jq -ce --arg work "$work" --arg branch "$branch" --arg target "$target" '
         if type == "object" and .work == $work and .branch == $branch and .target == $target
            and (.state == "open" or .state == "merged" or .state == "closed")
            and (.head_sha | type == "string")
-        then . else error("invalid mirror PR state identity") end' "$state_file") || {
+        then . else error("invalid mirror PR state identity") end') || {
+        echo "mirror-pr-reconcile: cannot read valid state for $work; will retry" >&2
+        return 1
+    }
+    [ -n "$state_json" ] || {
         echo "mirror-pr-reconcile: cannot read valid state for $work; will retry" >&2
         return 1
     }
@@ -313,6 +328,8 @@ reconcile() {
         [ .[] | select((.metadata.mirror_pr_reconcile_pending // "" | tostring) == "true")
           | select(.status == "blocked" or .status == "closed") ]
         | sort_by(.metadata.mirror_pr_last_checked_at // "", .id) | .[] end') || return 1
+    state_refs=$(rig_git ls-remote --refs origin 'refs/gc-pr-state/*') || return 1
+    state_refs=$(printf '%s\n' "$state_refs" | jq -Rr 'split("\t") | .[1] // empty') || return 1
     remaining=$rows
     found=false
     failed=0
@@ -329,7 +346,7 @@ reconcile() {
             [ "$normalized" = "$origin" ] || continue
         else
             valid_work "$work" || continue
-            [ -e "$state_dir/$work.json" ] || [ -L "$state_dir/$work.json" ] || continue
+            printf '%s\n' "$state_refs" | grep -Fx "refs/gc-pr-state/$work" >/dev/null || continue
         fi
         found=true
         if ! (reconcile_one); then
