@@ -271,6 +271,28 @@ test_polecat_startup_uses_standard_hook_claim() {
         fail "polecat propulsion fragment should call the standard hook claim path"
     grep -F 'After closing any formula step bead, immediately run' "$prompt" >/dev/null ||
         fail "polecat prompt must require hook continuation after each formula step"
+    grep -F '`gc.step_ref` is missing, the claimed bead is your work bead itself' "$prompt" >/dev/null ||
+        fail "polecat must recognize claims without formula step metadata as work beads"
+    grep -F 'a refinery rejection), with no step beads to claim. Run the recipe yourself in' "$prompt" >/dev/null ||
+        fail "bare work claims must run the recipe in the current session"
+    grep -F 'this session, in order from `workspace-setup`; if `rejection_reason` and `branch`' "$prompt" >/dev/null ||
+        fail "bare work claims must follow the recipe and resume rejected branches"
+    grep -F 'are present, resume the branch as described above. Do not find, claim, or close' "$prompt" >/dev/null ||
+        fail "bare work claims must not find, claim, or close step beads"
+    grep -F 'The `BLOCKS`, `BLOCKED BY`, and `TRACKED BY` sections' "$prompt" >/dev/null ||
+        fail "dependency sections must not be treated as claimed steps"
+    grep -F 'A step is yours only if `gc hook --claim --json` handed it to you.' "$prompt" >/dev/null ||
+        fail "step ownership must come from hook claim"
+    grep -F '`gc bd update ... --assignee` or `--status=in_progress` to claim any bead' "$prompt" >/dev/null ||
+        fail "manual bead claims must be forbidden"
+    grep -F 'hand-write `gc.claimed_at`, `gc.session_id`, `gc.session_name`, `gc.routed_to`' "$prompt" >/dev/null ||
+        fail "manual claim metadata must be forbidden"
+    grep -F 'or other `gc.*` claim metadata. Never use `gc bd close --force` on a step not' "$prompt" >/dev/null ||
+        fail "foreign step force-close must be forbidden"
+    grep -F 'gc bd update "$WORK_ID" --status=open --assignee=""' "$prompt" >/dev/null ||
+        fail "claimed bead release must remain available"
+    grep -F 'gc bd update "$WORK_BEAD_ID" --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to=""' "$prompt" >/dev/null ||
+        fail "work bead refinery handoff must remain available"
     grep -F 'After closing a step bead,' "$propulsion" >/dev/null ||
         fail "polecat propulsion fragment must require hook continuation after each formula step"
     ! grep -F 'run `gc hook` or' "$prompt" >/dev/null ||

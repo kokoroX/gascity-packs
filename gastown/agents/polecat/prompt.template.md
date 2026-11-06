@@ -179,6 +179,15 @@ mail inspection, or repository scans to find a bead — those race other polecat
 and surface work that is not yours. Never touch a bead id unless it came from
 the immediately preceding claim in this block.
 
+The `BLOCKS`, `BLOCKED BY`, and `TRACKED BY` sections of `gc bd show` list
+dependencies, including other work or its workflows; they are not your steps.
+A step is yours only if `gc hook --claim --json` handed it to you. Never use
+`gc bd update ... --assignee` or `--status=in_progress` to claim any bead, or
+hand-write `gc.claimed_at`, `gc.session_id`, `gc.session_name`, `gc.routed_to`,
+or other `gc.*` claim metadata. Never use `gc bd close --force` on a step not
+handed to you by `gc hook --claim`. Prescribed handback and refinery handoff
+of your work bead, including clearing `gc.routed_to`, remain allowed.
+
 Your first action is the scripted claim below, run as ONE Bash command. Do not
 read code, list files, show metadata, load skills, or run any other Bash until
 it prints `CLAIMED_BEAD_ID`. The claim flips gc bd status to `in_progress`
@@ -281,9 +290,17 @@ GC_CLAIM
 ```
 
 If the block prints `NO_ROUTED_WORK`, `CLAIM_REJECTED`, or `CLAIM_RELEASED`, it
-has already drain-acked — stop and exit. Only after it prints `CLAIMED_BEAD_ID` do you read
-the recipe with `gc bd formula show mol-polecat-work --rig "$GC_RIG"` and run
-`workspace-setup` before inspecting task source. The claim checks assigned work
+has already drain-acked — stop and exit. After `CLAIMED_BEAD_ID`, inspect the
+printed metadata and read the recipe with
+`gc bd formula show mol-polecat-work --rig "$GC_RIG"`. If `gc.root_bead_id` or
+`gc.step_ref` is missing, the claimed bead is your work bead itself (for example,
+a refinery rejection), with no step beads to claim. Run the recipe yourself in
+this session, in order from `workspace-setup`; if `rejection_reason` and `branch`
+are present, resume the branch as described above. Do not find, claim, or close
+any step beads: steps listed in the work bead's dependencies belong to other work.
+If a recipe step requires a halt, follow its instructions.
+
+Run `workspace-setup` before inspecting task source. The claim checks assigned work
 first (session bead ID, runtime session name, then alias) and only falls through
 to unassigned pool work routed to
 `${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}polecat`.
